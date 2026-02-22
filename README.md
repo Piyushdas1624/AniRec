@@ -84,6 +84,9 @@ npm run dev
 4. Securely enter your API key and create a local PIN.
 5. *Your key is strictly encrypted locally within your browser and NEVER touches our backend servers!*
 
+OR
+You Can Use Google Antigravity Auth. (Dont Use Primanry Email)
+
 ---
 
 ## 🛡️ Security First
