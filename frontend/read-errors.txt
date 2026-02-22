@@ -1,0 +1,9 @@
+﻿src/components/AnimeDetailModal.tsx(270,100): error TS2304: Cannot find name 'ArrowLeft'.
+src/components/AnimeDetailModal.tsx(271,101): error TS2304: Cannot find name 'ArrowRight'.
+src/pages/MyListPage.tsx(2,168): error TS6133: 'ArrowRight' is declared but its value is never read.
+src/pages/MyListPage.tsx(2,180): error TS6133: 'ArrowLeft' is declared but its value is never read.
+src/pages/MyListPage.tsx(2,191): error TS6133: 'MoreVertical' is declared but its value is never read.
+src/pages/MyListPage.tsx(2,205): error TS6133: 'Copy' is declared but its value is never read.
+src/pages/MyListPage.tsx(2,211): error TS6133: 'Tag' is declared but its value is never read.
+src/pages/MyListPage.tsx(2,216): error TS6133: 'Video' is declared but its value is never read.
+src/pages/MyListPage.tsx(637,47): error TS6133: 'e' is declared but its value is never read.

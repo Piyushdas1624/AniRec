@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.env
+*.db
+*.sqlite
+data/
+.DS_Store
+*.log
+*.tsbuildinfo
+
+# Personal/Test files
+/*.png
+/*.json
+/*.xml.gz
+/*.exe
+/*.txt
+/del/
+/jikan.md
+/kitsu.md
+/prompt.md

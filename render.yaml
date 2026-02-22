@@ -1,0 +1,29 @@
+# Render.com Blueprint — AniRec AI
+# Deploy as a single Web Service (backend serves frontend)
+services:
+  - type: web
+    name: anirec-ai
+    runtime: node
+    region: oregon
+    plan: free
+    buildCommand: |
+      cd frontend && npm install && npm run build &&
+      cd ../backend && npm install && npm run build
+    startCommand: cd backend && npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: DB_PATH
+        value: ./data/anime-recommender.db
+      - key: CORS_ORIGIN
+        sync: false  # Set this to your Render URL after first deploy
+    disk:
+      name: anirec-data
+      mountPath: /opt/render/project/src/backend/data
+      sizeGB: 1
