@@ -86,7 +86,7 @@ npm run dev
 
 OR
 You Can Use Google Antigravity Auth. (Dont Use Primanry Email)
-
+You can Also Share Your Google API Auth With Your Friends
 ---
 
 ## 🛡️ Security First
