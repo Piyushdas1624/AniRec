@@ -57,6 +57,18 @@ We completely revamped how you import your anime watch lists from **MyAnimeList*
 
 ## 🏎️ Quick Start: How to Run
 
+### 🚀 **One-Click Start (Windows Only)**
+
+You can use the provided batch file to automatically install dependencies and start both the backend and frontend servers simultaneously.
+
+1. Double-click the `Start_APP.bat` file in the root directory.
+2. The script will open separate command prompt windows for the frontend and backend.
+3. Access the frontend at `http://localhost:5173` and the backend at `http://localhost:3001`.
+
+---
+
+### 🛠️ **Manual Start (Any OS)**
+
 ### 1. ⚙️ Start The Backend
 
 ```bash
