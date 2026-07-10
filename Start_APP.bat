@@ -19,7 +19,7 @@ start "AniRec Backend" cmd /k "cd backend && npm run dev"
 
 echo.
 echo Starting Frontend Server...
-start "AniRec Frontend" cmd /k "cd frontend && npm run dev"
+start "AniRec Frontend" cmd /k "cd frontend && npm run dev -- --open"
 
 echo.
 echo Both servers have been started in new windows.
