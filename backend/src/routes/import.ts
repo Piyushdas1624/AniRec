@@ -5,9 +5,65 @@ import { v4 as uuidv4 } from 'uuid';
 import db from '../utils/db';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { searchAnime, getAnimeById, getAnimeByMalId, getAnimeByIds } from '../services/anilist';
+import { getImportManager, ResolverCoordinator, ImportDatabaseService, ImportRepository } from '../services/import';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+
+export interface ActiveImportJob {
+    jobId: string;
+    userId: string;
+    status: 'running' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
+    stage: string;
+    processed: number;
+    total: number;
+    currentAnime: string;
+    resolvedAniList: number;
+    resolvedJikan: number;
+    imported: number;
+    skippedAlreadyInList: number;
+    failedNotFound: number;
+    failedError: number;
+    startTime: number;
+    lastItemTime: number;
+    averageItemDuration: number;
+    etaSeconds: number;
+    cancelled: boolean;
+    warnings: string[];
+    errors: string[];
+    parsingStarted?: number;
+    aniListStarted?: number;
+    jikanStarted?: number;
+    savingStarted?: number;
+    completedAt?: number;
+    results: any[];
+}
+
+export const activeImportJobs = new Map<string, ActiveImportJob>();
+
+function calculateSmoothedEta(job: ActiveImportJob, processed: number, total: number) {
+    const now = Date.now();
+    const tInstant = (now - job.lastItemTime) / 1000;
+    job.lastItemTime = now;
+    
+    // EMA smoothing factor alpha = 0.15
+    const alpha = 0.15;
+    if (job.averageItemDuration === 0) {
+        job.averageItemDuration = tInstant > 0 ? tInstant : 0.5;
+    } else {
+        job.averageItemDuration = (alpha * tInstant) + ((1 - alpha) * job.averageItemDuration);
+    }
+
+    const remaining = total - processed;
+    const elapsed = (now - job.startTime) / 1000;
+
+    // Fallback to Jikan pacing minimum (remaining * 0.4) for first 3 seconds or 5 items
+    if (elapsed < 3 || processed < 5) {
+        job.etaSeconds = Math.round(remaining * 0.4);
+    } else {
+        job.etaSeconds = Math.round(remaining * job.averageItemDuration);
+    }
+}
 
 // MAL status mapping
 const MAL_STATUS_MAP: Record<string, string> = {
@@ -467,7 +523,417 @@ async function batchImportAnilistEntries(
     return { imported, skipped, failed, results };
 }
 
-// POST /api/import/file - Import from file (MAL XML/XML.gz, AniList JSON, plain text)
+// Background workers for async tasks
+// Background workers for async tasks
+async function runMALXmlImportBackground(jobId: string, entries: any[], userId: string) {
+    const manager = getImportManager();
+    const dbState = ImportRepository.getLibraryState(userId);
+    const nextRevision = (dbState ? dbState.version : 0) + 1;
+    const dbFlusher = new ImportDatabaseService(userId, nextRevision);
+
+    manager.startJob(jobId, async (signal) => {
+        const results: any[] = [];
+        const entryDbIds = new Map<number, number>();
+
+        // 1. Resolve metadata sequentially using ResolverCoordinator (supporting cancel)
+        for (let i = 0; i < entries.length; i++) {
+            if (signal.aborted) throw new Error('AbortError');
+            
+            const entry = entries[i];
+            manager.updateJobProgress(jobId, {
+                stage: 'Resolving',
+                currentAnime: entry.title,
+                processed: i
+            });
+
+            try {
+                const animeDbId = await ResolverCoordinator.resolveAnime(
+                    entry.malId,
+                    entry.title,
+                    entry.type,
+                    entry.episodes,
+                    signal
+                );
+                if (animeDbId) {
+                    entryDbIds.set(entry.malId, animeDbId);
+                    
+                    const job = manager.getJobSnapshot(jobId);
+                    if (job) {
+                        const stats = { ...job.statistics };
+                        const existingAnime = db.prepare('SELECT id FROM anime WHERE mal_id = ?').get(entry.malId) as any;
+                        if (existingAnime) {
+                            stats.resolvedAniList++;
+                        } else {
+                            stats.resolvedJikan++;
+                        }
+                        manager.updateJobProgress(jobId, { statistics: stats });
+                    }
+                } else {
+                    manager.addIssue(jobId, {
+                        type: 'NotFound',
+                        animeTitle: entry.title,
+                        malId: entry.malId,
+                        message: `Could not resolve MAL ID ${entry.malId}`,
+                        recoverable: false
+                    });
+                    const job = manager.getJobSnapshot(jobId);
+                    if (job) {
+                        const stats = { ...job.statistics };
+                        stats.failedNotFound++;
+                        manager.updateJobProgress(jobId, { statistics: stats });
+                    }
+                }
+            } catch (err: any) {
+                if (err.name === 'AbortError' || err.message === 'AbortError') {
+                    throw err;
+                }
+                manager.addIssue(jobId, {
+                    type: 'Network',
+                    animeTitle: entry.title,
+                    malId: entry.malId,
+                    message: err.message || 'Network query failure',
+                    recoverable: true
+                });
+                const job = manager.getJobSnapshot(jobId);
+                if (job) {
+                    const stats = { ...job.statistics };
+                    stats.failedError++;
+                    manager.updateJobProgress(jobId, { statistics: stats });
+                }
+            }
+        }
+
+        if (signal.aborted) throw new Error('AbortError');
+
+        // 2. Queue into ImportDatabaseService
+        manager.updateJobProgress(jobId, {
+            stage: 'Saving',
+            currentOperation: 'Writing list entries'
+        });
+
+        for (let i = 0; i < entries.length; i++) {
+            if (signal.aborted) throw new Error('AbortError');
+
+            const entry = entries[i];
+            const animeDbId = entryDbIds.get(entry.malId);
+            if (!animeDbId) continue;
+
+            const existing = db.prepare('SELECT id FROM user_anime WHERE user_id = ? AND anime_id = ?').get(userId, animeDbId) as any;
+            if (existing) {
+                const job = manager.getJobSnapshot(jobId);
+                if (job) {
+                    const stats = { ...job.statistics };
+                    stats.skippedAlreadyInList++;
+                    manager.updateJobProgress(jobId, { statistics: stats });
+                }
+                results.push({ title: entry.title, status: 'skipped', result: 'Already in list' });
+                continue;
+            }
+
+            const id = uuidv4();
+            const notes = [entry.comments, entry.tags].filter(Boolean).join(' | ') || null;
+
+            dbFlusher.enqueue({
+                id,
+                animeId: animeDbId,
+                status: MAL_STATUS_MAP[entry.status] || 'planning',
+                rating: entry.score > 0 ? entry.score : null,
+                notes,
+                episodesWatched: entry.watchedEpisodes
+            });
+            
+            const job = manager.getJobSnapshot(jobId);
+            if (job) {
+                manager.updateJobProgress(jobId, {
+                    processed: job.processed + 1
+                });
+            }
+            results.push({ title: entry.title, status: entry.status, result: 'imported' });
+        }
+
+        dbFlusher.flush();
+
+        // 3. Finalize: Update library_state revision
+        if (signal.aborted) throw new Error('AbortError');
+        manager.updateJobProgress(jobId, {
+            stage: 'Finalizing',
+            currentOperation: 'Finalizing database state'
+        });
+        
+        ImportRepository.updateLibraryState(userId, nextRevision);
+    });
+}
+
+async function runAniListImportBackground(jobId: string, entries: any[], userId: string) {
+    const manager = getImportManager();
+    const dbState = ImportRepository.getLibraryState(userId);
+    const nextRevision = (dbState ? dbState.version : 0) + 1;
+    const dbFlusher = new ImportDatabaseService(userId, nextRevision);
+
+    manager.startJob(jobId, async (signal) => {
+        const results: any[] = [];
+        const allIds = [...new Set(entries.filter(e => e.anilistId).map(e => e.anilistId))];
+
+        // 1. Check existing in DB
+        const dbExisting = new Map<number, { id: number; titleEnglish: string; titleRomaji: string }>();
+        for (const anilistId of allIds) {
+            if (signal.aborted) throw new Error('AbortError');
+            const row = db.prepare('SELECT id, title_english, title_romaji FROM anime WHERE anilist_id = ?').get(anilistId) as any;
+            if (row) {
+                dbExisting.set(anilistId, { id: row.id, titleEnglish: row.title_english, titleRomaji: row.title_romaji });
+            }
+        }
+
+        const missingIds = allIds.filter(id => !dbExisting.has(id));
+        const BATCH_SIZE = 50;
+        const titleMap = new Map<number, string>();
+
+        for (const [anilistId, row] of dbExisting) {
+            titleMap.set(anilistId, row.titleEnglish || row.titleRomaji || `AniList #${anilistId}`);
+        }
+
+        const fetchedMediaList: any[] = [];
+
+        // 2. Fetch missing in batches of 50
+        for (let i = 0; i < missingIds.length; i += BATCH_SIZE) {
+            if (signal.aborted) throw new Error('AbortError');
+
+            const batch = missingIds.slice(i, i + BATCH_SIZE);
+            manager.updateJobProgress(jobId, {
+                stage: 'Resolving',
+                currentAnime: `Batch fetch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(missingIds.length / BATCH_SIZE)}`
+            });
+
+            try {
+                if (i > 0) {
+                    await new Promise<void>((resolve, reject) => {
+                        const t = setTimeout(resolve, 1200);
+                        signal.addEventListener('abort', () => {
+                            clearTimeout(t);
+                            reject(new Error('AbortError'));
+                        });
+                    });
+                }
+
+                if (signal.aborted) throw new Error('AbortError');
+                const mediaList = await getAnimeByIds(batch, signal);
+                for (const media of mediaList) {
+                    fetchedMediaList.push(media);
+                    const title = media.title?.english || media.title?.romaji || `AniList #${media.id}`;
+                    titleMap.set(media.id, title);
+                }
+            } catch (err: any) {
+                if (err.name === 'AbortError' || err.message === 'AbortError') {
+                    throw err;
+                }
+                if (err.message?.includes('429')) {
+                    manager.addWarning(jobId, 'Rate limit hit, retrying batch...');
+                    await new Promise<void>((resolve, reject) => {
+                        const t = setTimeout(resolve, 5000);
+                        signal.addEventListener('abort', () => {
+                            clearTimeout(t);
+                            reject(new Error('AbortError'));
+                        });
+                    });
+                    try {
+                        if (signal.aborted) throw new Error('AbortError');
+                        const mediaList = await getAnimeByIds(batch, signal);
+                        for (const media of mediaList) {
+                            fetchedMediaList.push(media);
+                            const title = media.title?.english || media.title?.romaji || `AniList #${media.id}`;
+                            titleMap.set(media.id, title);
+                        }
+                    } catch (retryErr: any) {
+                        if (retryErr.name === 'AbortError' || retryErr.message === 'AbortError') throw retryErr;
+                        manager.addError(jobId, `Failed to resolve batch chunk: ${retryErr.message}`);
+                    }
+                } else {
+                    manager.addError(jobId, `Failed to resolve batch chunk: ${err.message}`);
+                }
+            }
+
+            const processedCount = Math.min(allIds.length, dbExisting.size + fetchedMediaList.length);
+            manager.updateJobProgress(jobId, { processed: processedCount });
+        }
+
+        if (signal.aborted) throw new Error('AbortError');
+
+        // 3. Save fetched media to DB
+        manager.updateJobProgress(jobId, {
+            stage: 'Saving',
+            currentOperation: 'Saving AniList metadata to database'
+        });
+
+        for (const media of fetchedMediaList) {
+            if (signal.aborted) throw new Error('AbortError');
+            const dbId = ResolverCoordinator.upsertAnimeFromMedia(media);
+            if (dbId) {
+                dbExisting.set(media.id, { id: dbId, titleEnglish: media.title?.english, titleRomaji: media.title?.romaji });
+                titleMap.set(media.id, media.title?.english || media.title?.romaji || `AniList #${media.id}`);
+                
+                const job = manager.getJobSnapshot(jobId);
+                if (job) {
+                    const stats = { ...job.statistics };
+                    stats.resolvedAniList++;
+                    manager.updateJobProgress(jobId, { statistics: stats });
+                }
+            }
+        }
+
+        // 4. Queue user anime entries to flusher
+        for (const entry of entries) {
+            if (signal.aborted) throw new Error('AbortError');
+            if (!entry.anilistId) continue;
+
+            const dbEntry = dbExisting.get(entry.anilistId);
+            const displayTitle = entry.title || titleMap.get(entry.anilistId) || `AniList #${entry.anilistId}`;
+
+            if (!dbEntry) {
+                const job = manager.getJobSnapshot(jobId);
+                if (job) {
+                    const stats = { ...job.statistics };
+                    stats.failedNotFound++;
+                    manager.updateJobProgress(jobId, { statistics: stats });
+                }
+                results.push({ title: displayTitle, status: 'failed', result: 'Not found on AniList' });
+                continue;
+            }
+
+            const existing = db.prepare('SELECT id FROM user_anime WHERE user_id = ? AND anime_id = ?').get(userId, dbEntry.id) as any;
+            if (existing) {
+                const job = manager.getJobSnapshot(jobId);
+                if (job) {
+                    const stats = { ...job.statistics };
+                    stats.skippedAlreadyInList++;
+                    manager.updateJobProgress(jobId, { statistics: stats });
+                }
+                results.push({ title: displayTitle, status: 'skipped', result: 'Already in list' });
+                continue;
+            }
+
+            const id = uuidv4();
+            dbFlusher.enqueue({
+                id,
+                animeId: dbEntry.id,
+                status: entry.status,
+                rating: entry.score > 0 ? entry.score : null,
+                notes: entry.notes || null,
+                episodesWatched: entry.progress
+            });
+
+            const job = manager.getJobSnapshot(jobId);
+            if (job) {
+                manager.updateJobProgress(jobId, {
+                    processed: job.processed + 1
+                });
+            }
+            results.push({ title: displayTitle, status: entry.status, result: 'imported' });
+        }
+
+        dbFlusher.flush();
+
+        // 5. Finalize: Update library_state revision
+        if (signal.aborted) throw new Error('AbortError');
+        manager.updateJobProgress(jobId, {
+            stage: 'Finalizing',
+            currentOperation: 'Finalizing database state'
+        });
+
+        ImportRepository.updateLibraryState(userId, nextRevision);
+    });
+}
+
+// GET /api/import/status - Consolidated status list
+router.get('/status', authMiddleware, (req: AuthRequest, res: Response) => {
+    const userId = req.userId || '';
+    const snapshot = getImportManager().getStatusSnapshot(userId);
+    res.json(snapshot);
+});
+
+// GET /api/import/status/:jobId - Poll job status (backwards compatible)
+router.get('/status/:jobId', authMiddleware, (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    const jobIdStr = jobId as string;
+    const manager = getImportManager();
+    const job = manager.getJobSnapshot(jobIdStr);
+
+    if (job) {
+        return res.json({
+            version: 1,
+            jobId: job.jobId,
+            status: job.status,
+            stage: job.stage,
+            processed: job.processed,
+            total: job.total,
+            overallProgress: job.total > 0 ? Math.round((job.processed / job.total) * 100) : 0,
+            currentAnime: job.currentAnime,
+            resolvedAniList: job.statistics.resolvedAniList,
+            resolvedJikan: job.statistics.resolvedJikan,
+            skippedAlreadyInList: job.statistics.skippedAlreadyInList,
+            failedNotFound: job.statistics.failedNotFound,
+            failedError: job.statistics.failedError,
+            etaSeconds: (job as any).etaSeconds || 0,
+            warnings: job.warnings,
+            errors: job.errors,
+            results: undefined
+        });
+    }
+
+    try {
+        const row = db.prepare('SELECT id, user_id, status, stage, processed, total, error, result_json, completed_at FROM import_jobs WHERE id = ?').get(jobIdStr) as any;
+        if (!row) {
+            return res.status(404).json({ error: 'Job not found' });
+        }
+
+        let meta: any = { statistics: { resolvedAniList: 0, resolvedJikan: 0, skippedAlreadyInList: 0, failedNotFound: 0, failedError: 0 }, warnings: [], errors: [], results: [] };
+        if (row.result_json) {
+            try {
+                meta = JSON.parse(row.result_json);
+            } catch {}
+        }
+
+        res.json({
+            version: 1,
+            jobId: row.id,
+            status: row.status,
+            stage: row.stage,
+            processed: row.processed,
+            total: row.total,
+            overallProgress: row.total > 0 ? Math.round((row.processed / row.total) * 100) : 0,
+            currentAnime: '',
+            resolvedAniList: meta.statistics?.resolvedAniList || meta.resolvedAniList || 0,
+            resolvedJikan: meta.statistics?.resolvedJikan || meta.resolvedJikan || 0,
+            skippedAlreadyInList: meta.statistics?.skippedAlreadyInList || meta.skippedAlreadyInList || 0,
+            failedNotFound: meta.statistics?.failedNotFound || meta.failedNotFound || 0,
+            failedError: meta.statistics?.failedError || meta.failedError || 0,
+            etaSeconds: 0,
+            warnings: meta.warnings || [],
+            errors: row.error ? [row.error] : [],
+            results: meta.results || [],
+            diagnostics: {
+                startedAt: row.started_at,
+                completedAt: row.completed_at
+            }
+        });
+    } catch (err: any) {
+        console.error('Failed to get job status from database:', err);
+        res.status(500).json({ error: 'Database error retrieving status' });
+    }
+});
+
+// POST /api/import/cancel/:jobId - Cancel running job
+router.post('/cancel/:jobId', authMiddleware, (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    try {
+        getImportManager().cancelJob(jobId as string);
+        res.json({ status: 'cancelled', jobId });
+    } catch (err: any) {
+        console.error('Failed to cancel job:', err);
+        res.status(500).json({ error: 'Failed to cancel job' });
+    }
+});
+
+// POST /api/import/file - Import from file (MAL XML/XML.gz, AniList JSON)
 router.post('/file', authMiddleware, upload.single('file'), async (req: AuthRequest, res: Response) => {
     try {
         if (!req.file) {
@@ -479,14 +945,12 @@ router.post('/file', authMiddleware, upload.single('file'), async (req: AuthRequ
         let content: string;
         let importType: 'mal_xml' | 'anilist_json' | 'text' = 'text';
 
-        // Decompress if gzip
         if (fileName.endsWith('.gz')) {
             content = zlib.gunzipSync(req.file.buffer).toString('utf-8');
         } else {
             content = req.file.buffer.toString('utf-8');
         }
 
-        // Detect format
         if (content.includes('<myanimelist>') || content.includes('<series_animedb_id>')) {
             importType = 'mal_xml';
         } else if (fileName.endsWith('.json') || content.trim().startsWith('{') || content.trim().startsWith('[')) {
@@ -498,108 +962,24 @@ router.post('/file', authMiddleware, upload.single('file'), async (req: AuthRequ
             }
         }
 
-        let imported = 0;
-        let skipped = 0;
-        let failed = 0;
-        const results: { title: string; status: string; result: string }[] = [];
+        if (importType !== 'mal_xml' && importType !== 'anilist_json') {
+            res.status(400).json({ error: 'Unsupported file format. Please upload MAL XML or AniList JSON export.' });
+            return;
+        }
+
+        const userId = req.userId || '';
 
         if (importType === 'mal_xml') {
-            const { entries, userInfo } = parseMALXml(content);
-            console.log(`Importing ${entries.length} anime from MAL export (user: ${userInfo.username})`);
-
-            // 1. Fetch/Resolve all Anime IDs asynchronously first
-            const entryDbIds = new Map<number, number>();
-            for (const entry of entries) {
-                try {
-                    const existingAnime = db.prepare('SELECT id FROM anime WHERE mal_id = ?').get(entry.malId) as any;
-                    if (existingAnime) {
-                        entryDbIds.set(entry.malId, existingAnime.id);
-                    } else {
-                        const animeDbId = await upsertAnimeByMalId(entry.malId, entry.title, entry.type, entry.episodes);
-                        if (animeDbId) {
-                            entryDbIds.set(entry.malId, animeDbId);
-                        }
-                    }
-                } catch (e) {
-                    console.warn(`MAL Import ID pre-resolution failed for MAL ID ${entry.malId}:`, e);
-                }
-            }
-
-            // 2. Execute all insertions inside a single database transaction
-            const runMALImportTransaction = db.transaction(() => {
-                for (const entry of entries) {
-                    try {
-                        const animeDbId = entryDbIds.get(entry.malId);
-                        if (!animeDbId) {
-                            failed++;
-                            results.push({ title: entry.title, status: 'failed', result: 'Could not find anime' });
-                            continue;
-                        }
-
-                        // Check if already in user's list
-                        const existing = db.prepare('SELECT id FROM user_anime WHERE user_id = ? AND anime_id = ?')
-                            .get(req.userId, animeDbId) as any;
-
-                        if (existing) {
-                            skipped++;
-                            results.push({ title: entry.title, status: 'skipped', result: 'Already in list' });
-                            continue;
-                        }
-
-                        const id = uuidv4();
-                        const notes = [entry.comments, entry.tags].filter(Boolean).join(' | ') || null;
-
-                        db.prepare(`
-                            INSERT INTO user_anime (id, user_id, anime_id, status, rating, notes, episodes_watched)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                        `).run(
-                            id, req.userId, animeDbId, entry.status,
-                            entry.score > 0 ? entry.score : null,
-                            notes, entry.watchedEpisodes
-                        );
-
-                        imported++;
-                        results.push({ title: entry.title, status: entry.status, result: 'imported' });
-                    } catch (err: any) {
-                        failed++;
-                        results.push({ title: entry.title, status: 'error', result: err.message });
-                    }
-                }
-            });
-
-            runMALImportTransaction();
-        } else if (importType === 'anilist_json') {
+            const { entries } = parseMALXml(content);
+            const jobId = getImportManager().createJob(userId, entries.length, 'NORMAL');
+            runMALXmlImportBackground(jobId, entries, userId);
+            res.status(202).json({ jobId, total: entries.length, status: 'running' });
+        } else {
             const parsed = parseAniListJson(JSON.parse(content));
-            console.log(`Importing ${parsed.entries.length} anime from AniList export`);
-
-            // Use fast batch import (50 anime per API call instead of 1)
-            const batchResult = await batchImportAnilistEntries(parsed.entries, req.userId);
-            imported = batchResult.imported;
-            skipped = batchResult.skipped;
-            failed = batchResult.failed;
-            results.push(...batchResult.results);
-
-            // Include user profile info in response if available (raw export)
-            if (parsed.userProfile) {
-                (res as any).__anilistProfile = parsed.userProfile;
-            }
+            const jobId = getImportManager().createJob(userId, parsed.entries.length, 'NORMAL');
+            runAniListImportBackground(jobId, parsed.entries, userId);
+            res.status(202).json({ jobId, total: parsed.entries.length, status: 'running' });
         }
-
-        const responseData: any = {
-            importType,
-            total: results.length,
-            imported,
-            skipped,
-            failed,
-            results, // Send full results for frontend 'Show More' functionality
-        };
-
-        // Include AniList profile info if available from raw export
-        if ((res as any).__anilistProfile) {
-            responseData.anilistProfile = (res as any).__anilistProfile;
-        }
-
-        res.json(responseData);
     } catch (error: any) {
         console.error('Import error:', error);
         res.status(500).json({ error: error.message || 'Import failed' });
@@ -617,7 +997,6 @@ router.post('/anilist-username', authMiddleware, async (req: AuthRequest, res: R
 
         console.log(`Fetching public AniList list for user: ${username}`);
 
-        // Fetch user profile + full anime list via AniList GraphQL API
         const query = `
             query ($name: String) {
                 User(name: $name) {
@@ -692,7 +1071,6 @@ router.post('/anilist-username', authMiddleware, async (req: AuthRequest, res: R
         const userData = gqlData.data?.User;
         const listsData = gqlData.data?.MediaListCollection?.lists || [];
 
-        // Build user profile
         const userProfile: AniListUserProfile = {
             id: userData?.id || 0,
             userName: userData?.name || username,
@@ -705,21 +1083,19 @@ router.post('/anilist-username', authMiddleware, async (req: AuthRequest, res: R
             minutesWatched: userData?.statistics?.anime?.minutesWatched || 0,
         };
 
-        // Parse all entries
         const parsed = parseAniListJson({ data: { MediaListCollection: { lists: listsData } } });
         console.log(`Fetched ${parsed.entries.length} anime from AniList user ${username}`);
 
-        // Use fast batch import
-        const batchResult = await batchImportAnilistEntries(parsed.entries, req.userId);
+        const userId = req.userId || '';
+        const jobId = getImportManager().createJob(userId, parsed.entries.length, 'NORMAL');
 
-        res.json({
-            importType: 'anilist_public',
-            total: batchResult.results.length,
-            imported: batchResult.imported,
-            skipped: batchResult.skipped,
-            failed: batchResult.failed,
-            results: batchResult.results,
-            anilistProfile: userProfile,
+        runAniListImportBackground(jobId, parsed.entries, userId);
+
+        res.status(202).json({ 
+            jobId, 
+            total: parsed.entries.length, 
+            status: 'running',
+            anilistProfile: userProfile
         });
     } catch (error: any) {
         console.error('AniList username import error:', error);

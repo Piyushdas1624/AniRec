@@ -11,3 +11,5 @@ export function getImportManager(): ImportManager {
 
 export * from './types';
 export { ImportRepository } from './repository';
+export { ResolverCoordinator } from './resolver';
+export { ImportDatabaseService } from './database';

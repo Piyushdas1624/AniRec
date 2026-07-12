@@ -28,10 +28,16 @@ export interface JikanAnime {
 const REQUEST_INTERVAL = 400;
 let requestQueue: Promise<any> = Promise.resolve();
 
-async function rateLimitedFetch(url: string): Promise<Response> {
+async function rateLimitedFetch(url: string, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) {
+        throw new Error('AbortError');
+    }
     const resultPromise = requestQueue.then(async () => {
+        if (signal?.aborted) {
+            throw new Error('AbortError');
+        }
         try {
-            return await fetch(url);
+            return await fetch(url, { signal });
         } finally {
             // Strict pacing: always delay the next request by 400ms, even if this request fails
             await new Promise(resolve => setTimeout(resolve, REQUEST_INTERVAL));
@@ -44,9 +50,9 @@ async function rateLimitedFetch(url: string): Promise<Response> {
     return resultPromise;
 }
 
-export async function searchAnimeJikan(query: string, page = 1): Promise<{ data: JikanAnime[]; hasNextPage: boolean }> {
+export async function searchAnimeJikan(query: string, page = 1, signal?: AbortSignal): Promise<{ data: JikanAnime[]; hasNextPage: boolean }> {
     const url = `${JIKAN_API}/anime?q=${encodeURIComponent(query)}&page=${page}&limit=20&sfw=true`;
-    const response = await rateLimitedFetch(url);
+    const response = await rateLimitedFetch(url, signal);
 
     if (!response.ok) throw new Error(`Jikan API error: ${response.status}`);
     const result: any = await response.json();
@@ -57,9 +63,9 @@ export async function searchAnimeJikan(query: string, page = 1): Promise<{ data:
     };
 }
 
-export async function getAnimeByIdJikan(malId: number): Promise<JikanAnime | null> {
+export async function getAnimeByIdJikan(malId: number, signal?: AbortSignal): Promise<JikanAnime | null> {
     const url = `${JIKAN_API}/anime/${malId}`;
-    const response = await rateLimitedFetch(url);
+    const response = await rateLimitedFetch(url, signal);
 
     if (!response.ok) {
         if (response.status === 404) return null;

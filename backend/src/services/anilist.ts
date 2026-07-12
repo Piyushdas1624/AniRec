@@ -79,7 +79,7 @@ export async function searchAnime(query: string, page = 1, perPage = 20): Promis
   };
 }
 
-export async function getAnimeById(anilistId: number): Promise<any | null> {
+export async function getAnimeById(anilistId: number, signal?: AbortSignal): Promise<any | null> {
   const graphqlQuery = `
     query ($id: Int) {
       Media(id: $id, type: ANIME) {
@@ -95,6 +95,7 @@ export async function getAnimeById(anilistId: number): Promise<any | null> {
       query: graphqlQuery,
       variables: { id: anilistId },
     }),
+    signal
   });
 
   if (!response.ok) throw new Error(`AniList API error: ${response.status}`);
@@ -102,7 +103,7 @@ export async function getAnimeById(anilistId: number): Promise<any | null> {
   return data.data.Media;
 }
 
-export async function getAnimeByMalId(malId: number): Promise<any | null> {
+export async function getAnimeByMalId(malId: number, signal?: AbortSignal): Promise<any | null> {
   const graphqlQuery = `
     query ($id: Int) {
       Media(idMal: $id, type: ANIME) {
@@ -118,6 +119,7 @@ export async function getAnimeByMalId(malId: number): Promise<any | null> {
       query: graphqlQuery,
       variables: { id: malId },
     }),
+    signal
   });
 
   if (!response.ok) return null; // Don't throw, just return null if not found
@@ -125,7 +127,7 @@ export async function getAnimeByMalId(malId: number): Promise<any | null> {
   return data.data?.Media || null;
 }
 
-export async function getAnimeByIds(anilistIds: number[]): Promise<any[]> {
+export async function getAnimeByIds(anilistIds: number[], signal?: AbortSignal): Promise<any[]> {
   const graphqlQuery = `
     query ($ids: [Int]) {
       Page(perPage: 50) {
@@ -143,6 +145,7 @@ export async function getAnimeByIds(anilistIds: number[]): Promise<any[]> {
       query: graphqlQuery,
       variables: { ids: anilistIds },
     }),
+    signal
   });
 
   if (!response.ok) throw new Error(`AniList API error: ${response.status}`);
