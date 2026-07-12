@@ -152,9 +152,12 @@ router.get('/library/delta', authMiddleware, (req: AuthRequest, res: Response) =
             WHERE l.user_id = ? AND l.sequence > ?
             ORDER BY l.sequence ASC
             LIMIT ?
-        `).all(userId, sinceSequence, limit) as any[];
+        `).all(userId, sinceSequence, limit + 1) as any[];
 
-        const changes = logs.map(item => {
+        const hasMore = logs.length > limit;
+        const slicedLogs = hasMore ? logs.slice(0, limit) : logs;
+
+        const changes = slicedLogs.map(item => {
             if (item.action === 'delete') {
                 return {
                     sequence: item.sequence,
@@ -195,7 +198,6 @@ router.get('/library/delta', authMiddleware, (req: AuthRequest, res: Response) =
             };
         });
 
-        const hasMore = changes.length === limit;
         const nextSequence = changes.length > 0 ? changes[changes.length - 1].sequence : null;
 
         res.json({

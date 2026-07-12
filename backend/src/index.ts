@@ -147,9 +147,13 @@ async function gracefulShutdown(signal: string) {
     }
 
     try {
-        await getImportManager().shutdown();
-    } catch (err) {
-        console.error('Error during ImportManager shutdown:', err);
+        const shutdownPromise = getImportManager().shutdown();
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Shutdown timeout')), 16000)
+        );
+        await Promise.race([shutdownPromise, timeoutPromise]);
+    } catch (err: any) {
+        console.error('Error during ImportManager shutdown:', err.message || err);
     }
 
     try {
