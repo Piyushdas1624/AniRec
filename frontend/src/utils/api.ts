@@ -159,10 +159,10 @@ class ApiClient {
         return { accessToken: auth.accessToken, projectId: auth.projectId };
     }
 
-    async listModels(apiKey: string) {
+    async listModels(apiKey?: string, accessToken?: string, forceRefresh = false) {
         return this.request<{ models: { id: string; displayName: string; description: string }[] }>('/gemini/models', {
             method: 'POST',
-            body: { apiKey },
+            body: { apiKey, accessToken, forceRefresh },
         });
     }
 
@@ -289,9 +289,21 @@ class ApiClient {
     }
 
     async importAniListByUsername(username: string) {
-        return this.request<{ imported: number; failed: number; skipped: number; total: number; results: any[]; anilistProfile?: any }>('/import/anilist-username', {
+        return this.request<any>('/import/anilist-username', {
             method: 'POST',
             body: { username },
+        });
+    }
+
+    async getImportStatus(jobId: string) {
+        return this.request<any>(`/import/status/${jobId}`, {
+            method: 'GET',
+        });
+    }
+
+    async cancelImport(jobId: string) {
+        return this.request<any>(`/import/cancel/${jobId}`, {
+            method: 'POST',
         });
     }
 

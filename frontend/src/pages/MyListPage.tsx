@@ -82,6 +82,17 @@ export default function MyListPage() {
     const [importPhase, setImportPhase] = useState<'uploading' | 'processing' | 'done' | null>(null);
     const [importResult, setImportResult] = useState<any>(null);
     const [importEta, setImportEta] = useState<number | null>(null);
+    const [activeJobId, setActiveJobId] = useState<string | null>(null);
+    const [importStage, setImportStage] = useState<string>('');
+    const [currentAnime, setCurrentAnime] = useState<string>('');
+    const [resolvedAniList, setResolvedAniList] = useState(0);
+    const [resolvedJikan, setResolvedJikan] = useState(0);
+    const [skippedAlreadyInList, setSkippedAlreadyInList] = useState(0);
+    const [failedNotFound, setFailedNotFound] = useState(0);
+    const [failedError, setFailedError] = useState(0);
+    const [jobWarnings, setJobWarnings] = useState<string[]>([]);
+    const [jobErrors, setJobErrors] = useState<string[]>([]);
+    const cancelPollRef = useRef<(() => void) | null>(null);
     const [importFilter, setImportFilter] = useState<'all' | 'failed' | 'resolution'>('all');
     const [importLimit, setImportLimit] = useState(30);
     const [sheepCount, setSheepCount] = useState(0);
@@ -325,6 +336,103 @@ export default function MyListPage() {
     };
 
     // Import handlers
+    const startPollingJob = (jobId: string) => {
+        setActiveJobId(jobId);
+        let backoffDelay = 500;
+        let pollTimer: any = null;
+        let isClosed = false;
+
+        const poll = async () => {
+            if (isClosed) return;
+            try {
+                const status = await api.getImportStatus(jobId);
+                
+                // Reset backoff delay on successful request
+                backoffDelay = 500;
+
+                setImportProgress(status.overallProgress);
+                setImportStage(status.stage || '');
+                setCurrentAnime(status.currentAnime || '');
+                setResolvedAniList(status.resolvedAniList || 0);
+                setResolvedJikan(status.resolvedJikan || 0);
+                setSkippedAlreadyInList(status.skippedAlreadyInList || 0);
+                setFailedNotFound(status.failedNotFound || 0);
+                setFailedError(status.failedError || 0);
+                setImportEta(status.etaSeconds);
+                setJobWarnings(status.warnings || []);
+                setJobErrors(status.errors || []);
+
+                if (status.status === 'completed') {
+                    setImportPhase('done');
+                    setImportProgress(100);
+                    setImportEta(null);
+                    
+                    const resultsList = status.results || [];
+                    setImportResult({
+                        imported: status.resolvedAniList + status.resolvedJikan,
+                        skipped: status.skippedAlreadyInList,
+                        failed: status.failedNotFound + status.failedError,
+                        results: resultsList
+                    });
+
+                    toast.success('Import complete!');
+                    setImporting(false);
+                    loadList();
+                    return;
+                }
+
+                if (status.status === 'failed' || status.status === 'cancelled' || status.status === 'abandoned') {
+                    setImportPhase(null);
+                    setImporting(false);
+                    setImportEta(null);
+                    
+                    let errorMsg = status.errors?.[status.errors.length - 1] || 'Import failed';
+                    if (status.status === 'cancelled') {
+                        errorMsg = 'Import cancelled by user';
+                    } else if (status.status === 'abandoned') {
+                        errorMsg = 'Import abandoned: server restarted';
+                    }
+                    toast.error(errorMsg);
+                    return;
+                }
+
+                pollTimer = setTimeout(poll, backoffDelay);
+            } catch (err: any) {
+                console.error('Polling error, backing off:', err);
+                backoffDelay = Math.min(8000, backoffDelay * 2);
+                pollTimer = setTimeout(poll, backoffDelay);
+            }
+        };
+
+        pollTimer = setTimeout(poll, backoffDelay);
+
+        return () => {
+            isClosed = true;
+            if (pollTimer) clearTimeout(pollTimer);
+        };
+    };
+
+    const handleCancelImport = async () => {
+        if (!activeJobId) return;
+        try {
+            await api.cancelImport(activeJobId);
+            toast('Cancelling import...');
+            if (cancelPollRef.current) cancelPollRef.current();
+            setImporting(false);
+            setImportPhase(null);
+            setImportEta(null);
+        } catch (err: any) {
+            toast.error(err.message || 'Failed to cancel import');
+        }
+    };
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => {
+            if (cancelPollRef.current) cancelPollRef.current();
+        };
+    }, []);
+
     const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
@@ -335,31 +443,27 @@ export default function MyListPage() {
         setImportPhase('uploading');
         setImportProgress(0);
         setImportEta(null);
+        setJobWarnings([]);
+        setJobErrors([]);
 
         try {
-            const result = await api.importFile(file, (progress) => {
+            const uploadRes = await api.importFile(file, (progress) => {
                 setImportProgress(progress);
                 if (progress >= 100) {
                     setImportPhase('processing');
-                    // Estimate: ~2s per batch of 50 anime for AniList, or ~0.5s per MAL entry
-                    const isJson = file.name.toLowerCase().endsWith('.json');
-                    setImportEta(isJson ? 30 : 15); // rough estimates
                 }
             });
 
-            setImportPhase('done');
-            setImportProgress(100);
-            setImportEta(null);
-            setImportResult(result);
-            toast.success(`Imported ${result.imported} anime! (${result.skipped} skipped, ${result.failed} failed)`);
-            if (result.imported > 0) loadList();
+            // Start polling
+            const cleanupPoll = startPollingJob(uploadRes.jobId);
+            cancelPollRef.current = cleanupPoll;
+
         } catch (err: any) {
             toast.error(err.message || 'Import failed');
             setImportPhase(null);
             setImportEta(null);
-        } finally {
             setImporting(false);
-            setImportEta(null);
+        } finally {
             if (fileInputRef.current) fileInputRef.current.value = '';
         }
     };
@@ -439,37 +543,23 @@ export default function MyListPage() {
         setImportLimit(30);
         setImportPhase('processing');
         setImportProgress(0);
-        setImportEta(30); // ~30s for batch fetch of typical lists
+        setImportEta(null);
+        setJobWarnings([]);
+        setJobErrors([]);
 
         try {
-            const startTime = Date.now();
-            // Smart progress simulation: fast at start, slows near end
-            const progressInterval = setInterval(() => {
-                const elapsed = (Date.now() - startTime) / 1000;
-                // Use logarithmic curve so it slows as it approaches 95%
-                const simProgress = Math.min(95, Math.round(30 * Math.log2(elapsed + 1)));
-                setImportProgress(simProgress);
-                // Update ETA: estimate remaining based on progress
-                const estimatedTotal = elapsed / (simProgress / 100);
-                setImportEta(Math.max(0, Math.round(estimatedTotal - elapsed)));
-            }, 800);
+            // First fetch the profile & start the job
+            const startRes = await api.importAniListByUsername(username);
 
-            const result = await api.importAniListByUsername(username);
+            // Start polling
+            const cleanupPoll = startPollingJob(startRes.jobId);
+            cancelPollRef.current = cleanupPoll;
 
-            clearInterval(progressInterval);
-            setImportProgress(100);
-            setImportPhase('done');
-            setImportEta(null);
-            setImportResult(result);
-            toast.success(`Imported ${result.imported} anime from ${username}! (${result.skipped} skipped, ${result.failed} failed)`);
-            if (result.imported > 0) loadList();
         } catch (err: any) {
             toast.error(err.message || 'Failed to import from AniList');
             setImportPhase(null);
             setImportEta(null);
-        } finally {
             setImporting(false);
-            setImportEta(null);
         }
     };
 
@@ -1055,17 +1145,52 @@ export default function MyListPage() {
 
                                         <div className="import-progress-label">
                                             {importPhase === 'uploading' && '📤 Uploading your file...'}
-                                            {importPhase === 'processing' && '⚙️ Fetching anime data from AniList...'}
+                                            {importPhase === 'processing' && `⚙️ ${importStage || 'Processing...'}`}
                                             {importPhase === 'done' && '✅ Import complete!'}
                                         </div>
                                         <div className="import-progress-sublabel">
                                             {importPhase === 'uploading' && 'Transferring to server'}
-                                            {importPhase === 'processing' && 'Batch fetching 50 anime per request — hang tight!'}
+                                            {importPhase === 'processing' && (
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', alignItems: 'center' }}>
+                                                    {currentAnime && (
+                                                        <div style={{ fontSize: '0.85rem', color: 'var(--accent-primary)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '280px' }}>
+                                                            📖 {currentAnime}
+                                                        </div>
+                                                    )}
+                                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', fontSize: '0.75rem', color: 'var(--text-secondary)', background: 'rgba(255,255,255,0.02)', padding: '10px 14px', borderRadius: 8, marginTop: 4 }}>
+                                                        <div>✨ AniList: <strong>{resolvedAniList}</strong></div>
+                                                        <div>🌐 Jikan: <strong>{resolvedJikan}</strong></div>
+                                                        <div>⏩ Skipped: <strong>{skippedAlreadyInList}</strong></div>
+                                                        <div>❌ Failed: <strong>{failedNotFound + failedError}</strong></div>
+                                                    </div>
+                                                </div>
+                                            )}
                                             {importPhase === 'done' && 'Your list has been updated'}
                                         </div>
                                         {importEta !== null && importEta > 0 && (
                                             <div className="import-eta mt-2" style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', background: 'rgba(255,255,255,0.05)', padding: '4px 12px', borderRadius: 12 }}>
                                                 ⏳ Estimated: ~{importEta >= 60 ? `${Math.floor(importEta / 60)}m ${Math.round(importEta % 60)}s` : `${Math.ceil(importEta)}s`}
+                                            </div>
+                                        )}
+                                        {importPhase === 'processing' && activeJobId && (
+                                            <button
+                                                className="btn btn-sm btn-ghost mt-3 text-red-500 hover:bg-red-500/10"
+                                                onClick={handleCancelImport}
+                                                style={{ color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)', padding: '4px 12px', borderRadius: 6, marginTop: 12 }}
+                                            >
+                                                Cancel Import
+                                            </button>
+                                        )}
+                                        {jobWarnings.length > 0 && (
+                                            <div style={{ maxHeight: '80px', overflowY: 'auto', textAlign: 'left', fontSize: '0.75rem', color: '#f59e0b', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', padding: '6px 12px', borderRadius: 8, marginTop: 10, width: '100%' }}>
+                                                ⚠️ Warnings:
+                                                {jobWarnings.map((w, idx) => <div key={idx} style={{ marginTop: 2 }}>• {w}</div>)}
+                                            </div>
+                                        )}
+                                        {jobErrors.length > 0 && (
+                                            <div style={{ maxHeight: '80px', overflowY: 'auto', textAlign: 'left', fontSize: '0.75rem', color: '#ef4444', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', padding: '6px 12px', borderRadius: 8, marginTop: 10, width: '100%' }}>
+                                                ❌ Errors:
+                                                {jobErrors.map((e, idx) => <div key={idx} style={{ marginTop: 2 }}>• {e}</div>)}
                                             </div>
                                         )}
                                         {/* Rotating anime fun facts */}

@@ -10,7 +10,17 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 import { getSharedAntigravityAuth } from './admin';
 
+import crypto from 'crypto';
+
 const router = Router();
+
+interface ModelCache {
+    list: any[];
+    timestamp: number;
+    authHash: string;
+}
+
+let modelCache: ModelCache | null = null;
 
 // Helper: extract auth credentials from request body (supports API key, user's Antigravity, or shared session)
 function getAuthFromBody(body: any, userId?: string): { apiKey: string; antigravityAuth?: { accessToken: string; projectId: string } } {
@@ -51,13 +61,38 @@ function hasAuth(body: any, userId?: string): boolean {
 // POST /api/gemini/models - List available Gemini models
 router.post('/models', authMiddleware, async (req: AuthRequest, res: Response) => {
     try {
-        const { apiKey } = req.body;
+        let { apiKey, forceRefresh = false } = req.body;
+        let accessToken: string | undefined;
+
         if (!apiKey) {
-            res.status(400).json({ error: 'API key required' });
-            return;
+            const auth = getAuthFromBody(req.body, req.userId);
+            if (auth.antigravityAuth?.accessToken) {
+                accessToken = auth.antigravityAuth.accessToken;
+            } else {
+                res.status(400).json({ error: 'API key or active Antigravity session required' });
+                return;
+            }
         }
 
-        const models = await listGeminiModels(apiKey);
+        // Generate SHA-256 hash of credential
+        const credentialToHash = apiKey || accessToken || '';
+        const authHash = crypto.createHash('sha256').update(credentialToHash).digest('hex');
+
+        // Check cache (TTL = 1 hour)
+        const cacheTTL = 60 * 60 * 1000;
+        if (!forceRefresh && modelCache && modelCache.authHash === authHash && (Date.now() - modelCache.timestamp < cacheTTL)) {
+            return res.json({ models: modelCache.list });
+        }
+
+        const models = await listGeminiModels(apiKey, accessToken);
+        
+        // Update cache
+        modelCache = {
+            list: models,
+            timestamp: Date.now(),
+            authHash
+        };
+
         res.json({ models });
     } catch (error: any) {
         console.error('List models error:', error);

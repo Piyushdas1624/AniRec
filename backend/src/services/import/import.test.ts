@@ -114,6 +114,62 @@ test('ImportDatabaseService - Batching and flusher logic', () => {
     assert.strictEqual(countFinal, 21, 'shutdown should flush remaining items in buffer');
 });
 
+test('ImportDatabaseService - Time-based flusher trigger', async () => {
+    const { ImportDatabaseService } = require('./database');
+
+    db.prepare("DELETE FROM user_anime WHERE user_id = 'user1'").run();
+    db.prepare("DELETE FROM library_sync_log WHERE user_id = 'user1'").run();
+
+    const flusher = new ImportDatabaseService('user1', 20);
+
+    // Enqueue 19 items (below 20 threshold)
+    for (let i = 0; i < 19; i++) {
+        flusher.enqueue({
+            id: `timer-id-${i}`,
+            animeId: 9000 + i,
+            status: 'watching',
+            rating: 8,
+            notes: 'good',
+            episodesWatched: 5
+        });
+    }
+
+    // Wait 400ms - should not have committed yet
+    await new Promise(resolve => setTimeout(resolve, 400));
+    const countMid = (db.prepare("SELECT COUNT(*) as count FROM user_anime WHERE user_id = 'user1'").get() as any).count;
+    assert.strictEqual(countMid, 0, 'should not commit after 400ms');
+
+    // Wait another 800ms (total 1200ms) - should have committed
+    await new Promise(resolve => setTimeout(resolve, 800));
+    const countEnd = (db.prepare("SELECT COUNT(*) as count FROM user_anime WHERE user_id = 'user1'").get() as any).count;
+    assert.strictEqual(countEnd, 19, 'should commit automatically after 1000ms timer');
+});
+
+test('ImportDatabaseService - Size-based flusher trigger (immediate)', () => {
+    const { ImportDatabaseService } = require('./database');
+
+    db.prepare("DELETE FROM user_anime WHERE user_id = 'user1'").run();
+    db.prepare("DELETE FROM library_sync_log WHERE user_id = 'user1'").run();
+
+    const flusher = new ImportDatabaseService('user1', 30);
+
+    // Enqueue 20 items immediately
+    for (let i = 0; i < 20; i++) {
+        flusher.enqueue({
+            id: `size-id-${i}`,
+            animeId: 9000 + i,
+            status: 'watching',
+            rating: 8,
+            notes: 'good',
+            episodesWatched: 5
+        });
+    }
+
+    // Check count immediately without waiting - should be 20
+    const countImmediate = (db.prepare("SELECT COUNT(*) as count FROM user_anime WHERE user_id = 'user1'").get() as any).count;
+    assert.strictEqual(countImmediate, 20, 'should commit 20 items immediately');
+});
+
 test('ResolverCoordinator - AbortSignal cancellation', async () => {
     const { ResolverCoordinator } = require('./resolver');
     const controller = new AbortController();

@@ -78,10 +78,9 @@ async function callGeminiStandard(
 // Antigravity (Cloud Code) API — uses cloudcode-pa.googleapis.com
 // Includes automatic model fallback on 429 (capacity exhausted)
 const ANTIGRAVITY_FALLBACK_MODELS = [
-    'gemini-3-flash-preview',
-    'gemini-2.5-flash',
-    'gemini-2.5-pro',
-    'gemini-3.1-pro-low',
+    'gemini-flash',
+    'gemini-flash-lite',
+    'gemini-pro',
 ];
 
 async function callGeminiAntigravity(
@@ -335,12 +334,21 @@ Return the complete updated user.md content as plain markdown (not wrapped in co
 }
 
 // List available Gemini models
-export async function listGeminiModels(apiKey: string): Promise<{ id: string; displayName: string; description: string }[]> {
-    const url = `${GEMINI_API_BASE}/models?key=${apiKey}`;
+export async function listGeminiModels(apiKey?: string, accessToken?: string): Promise<{ id: string; displayName: string; description: string }[]> {
+    let url = `${GEMINI_API_BASE}/models`;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+    if (apiKey) {
+        url += `?key=${apiKey}`;
+    } else if (accessToken) {
+        headers['Authorization'] = `Bearer ${accessToken}`;
+    } else {
+        throw new Error('API key or Access Token required to list models');
+    }
 
     const response = await fetch(url, {
         method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
     });
 
     if (!response.ok) {

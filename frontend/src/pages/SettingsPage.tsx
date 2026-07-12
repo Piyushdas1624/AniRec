@@ -70,14 +70,26 @@ export default function SettingsPage() {
     const [tokenInfo, setTokenInfo] = useState(getTokenDebugInfo());
 
     useEffect(() => {
-        setHasKey(hasStoredApiKey());
-        setAntigravityAccount(getStoredAntigravityAccount());
+        const hasKey = hasStoredApiKey();
+        setHasKey(hasKey);
+        
+        const account = getStoredAntigravityAccount();
+        setAntigravityAccount(account);
 
         // Load session sharing info
         api.getSessionInfo().then(info => {
             setSessionInfo(info);
             if (info.hasSession) setShowDashboard(true);
         }).catch(() => { });
+
+        // Dynamically load models on mount if Antigravity is active
+        if (account) {
+            api.listModels(undefined, account.accessToken)
+                .then(res => setModels(res.models))
+                .catch(() => {
+                    setModels(ANTIGRAVITY_MODELS);
+                });
+        }
     }, []);
 
     // Poll session info every 10s when admin has active session
@@ -103,11 +115,20 @@ export default function SettingsPage() {
         return () => clearInterval(interval);
     }, [showDebug]);
 
-    const loadModels = async () => {
-        // If Antigravity auth is available, use its model list directly
-        if (getStoredAntigravityAccount()) {
-            setModels(ANTIGRAVITY_MODELS);
-            toast.success(`Loaded ${ANTIGRAVITY_MODELS.length} Antigravity models`);
+    const loadModels = async (force = false) => {
+        const account = getStoredAntigravityAccount();
+        if (account) {
+            setLoadingModels(true);
+            try {
+                const { models: modelList } = await api.listModels(undefined, account.accessToken, force);
+                setModels(modelList);
+                toast.success(`Loaded ${modelList.length} Antigravity models`);
+            } catch (err: any) {
+                setModels(ANTIGRAVITY_MODELS);
+                toast.error(err.message || 'Failed to load live models, using offline defaults');
+            } finally {
+                setLoadingModels(false);
+            }
             return;
         }
 
@@ -127,7 +148,7 @@ export default function SettingsPage() {
                 return;
             }
 
-            const { models: modelList } = await api.listModels(key);
+            const { models: modelList } = await api.listModels(key, undefined, force);
             setModels(modelList);
             toast.success(`Loaded ${modelList.length} models`);
         } catch (err: any) {
@@ -195,24 +216,56 @@ export default function SettingsPage() {
 
     // Build model list: use fetched models if available, else construct from defaults + Antigravity
     const getModelList = (): GeminiModel[] => {
-        if (models.length > 0) return models;
+        let list: GeminiModel[] = [];
+        if (models.length > 0) {
+            list = [...models];
+        } else {
+            // Default models for standard API key users
+            const defaults: GeminiModel[] = [
+                { id: 'gemini-3.5-pro', displayName: 'Gemini 3.5 Pro', description: 'Advanced reasoning and coding' },
+                { id: 'gemini-3.5-flash', displayName: 'Gemini 3.5 Flash', description: 'Fast, efficient, and cost-effective' },
+                { id: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash Lite', description: 'Lightweight' },
+                { id: 'gemini-3.1-pro-high', displayName: 'Gemini 3.1 Pro (High)', description: 'Latest & most capable, high compute' },
+                { id: 'gemini-3.1-pro-low', displayName: 'Gemini 3.1 Pro (Low)', description: 'Latest pro model, lower compute' },
+                { id: 'gemini-2.5-pro-preview-05-06', displayName: 'Gemini 2.5 Pro', description: 'Advanced reasoning' },
+                { id: 'gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', description: 'Fast and cost-effective' },
+                { id: 'gemini-2.0-flash', displayName: 'Gemini 2.0 Flash', description: 'Fast and cost-effective' },
+            ];
 
-        // Default models for standard API key users
-        const defaults: GeminiModel[] = [
-            { id: 'gemini-2.5-pro-preview-05-06', displayName: 'Gemini 2.5 Pro', description: 'Advanced reasoning' },
-            { id: 'gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', description: 'Fast and cost-effective' },
-            { id: 'gemini-2.0-flash', displayName: 'Gemini 2.0 Flash', description: 'Fast and cost-effective' },
-            { id: 'gemini-2.0-flash-lite', displayName: 'Gemini 2.0 Flash Lite', description: 'Lightweight' },
-        ];
-
-        // If Antigravity is connected, use Antigravity models as primary + add any non-overlapping defaults
-        if (antigravityAccount) {
-            const antigravityIds = new Set(ANTIGRAVITY_MODELS.map(m => m.id));
-            const extraDefaults = defaults.filter(d => !antigravityIds.has(d.id));
-            return [...ANTIGRAVITY_MODELS, ...extraDefaults];
+            if (antigravityAccount) {
+                const antigravityIds = new Set(ANTIGRAVITY_MODELS.map(m => m.id));
+                const extraDefaults = defaults.filter(d => !antigravityIds.has(d.id));
+                list = [...ANTIGRAVITY_MODELS, ...extraDefaults];
+            } else {
+                list = defaults;
+            }
         }
 
-        return defaults;
+        // Add saved proModel if missing to preserve the user's setting visually
+        const savedPro = user?.settings?.proModel;
+        if (savedPro && savedPro !== '__custom') {
+            if (!list.some(m => m.id === savedPro)) {
+                list.push({
+                    id: savedPro,
+                    displayName: `⚠ ${savedPro} (Saved, but currently unavailable)`,
+                    description: 'Saved configuration model is not active on your Google account'
+                });
+            }
+        }
+
+        // Add saved flashModel if missing to preserve the user's setting visually
+        const savedFlash = user?.settings?.flashModel;
+        if (savedFlash && savedFlash !== '__custom') {
+            if (!list.some(m => m.id === savedFlash)) {
+                list.push({
+                    id: savedFlash,
+                    displayName: `⚠ ${savedFlash} (Saved, but currently unavailable)`,
+                    description: 'Saved configuration model is not active on your Google account'
+                });
+            }
+        }
+
+        return list;
     };
 
     // Deduplicate by id
@@ -747,7 +800,7 @@ export default function SettingsPage() {
                             </div>
                             <button
                                 className="btn btn-secondary btn-sm"
-                                onClick={loadModels}
+                                onClick={() => loadModels(true)}
                                 disabled={loadingModels}
                             >
                                 <RefreshCcw size={14} className={loadingModels ? 'spinning' : ''} />
