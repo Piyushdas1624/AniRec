@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useImport } from '../context/ImportContext';
 import { type ImportJob } from '../utils/importSyncService';
 import { Loader2, ChevronDown, ChevronUp, X, CheckCircle2, AlertCircle, Clock, Ban } from 'lucide-react';
@@ -13,6 +13,19 @@ export default function BackgroundTasksWidget() {
     } = useImport();
 
     const [isExpanded, setIsExpanded] = useState(false);
+    const [isHighlighted, setIsHighlighted] = useState(false);
+
+    useEffect(() => {
+        const handleHighlight = () => {
+            setIsHighlighted(true);
+            setIsExpanded(true); // Auto-expand when highlighted so user sees progress immediately!
+            setTimeout(() => {
+                setIsHighlighted(false);
+            }, 3000);
+        };
+        window.addEventListener('widget:highlight', handleHighlight);
+        return () => window.removeEventListener('widget:highlight', handleHighlight);
+    }, []);
 
     const totalActiveCount = activeJobs.length + queuedJobs.length;
     const hasAnyJobs = activeJobs.length > 0 || queuedJobs.length > 0 || completedJobs.length > 0;
@@ -59,7 +72,7 @@ export default function BackgroundTasksWidget() {
         <div className="tasks-widget-container">
             {/* Header */}
             <div
-                className={`tasks-widget-header ${totalActiveCount > 0 ? 'active' : ''}`}
+                className={`tasks-widget-header ${totalActiveCount > 0 ? 'active' : ''} ${isHighlighted ? 'widget-highlight-pulse' : ''}`}
                 onClick={() => setIsExpanded(!isExpanded)}
             >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
