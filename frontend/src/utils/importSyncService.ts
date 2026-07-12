@@ -48,16 +48,28 @@ export class ImportSyncService {
     private isSyncing = false;
 
     private onStateChange: (state: ImportServiceState) => void;
-    private onLibrarySync: (changes: any[], isComplete: boolean) => void;
+    private onLibrarySync: (changes: any[], isComplete: boolean) => Promise<void> | void;
+    private onJobFinished: (event: {
+        jobId: string;
+        status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'abandoned' | 'cancelling';
+        processed: number;
+        total: number;
+        errors: string[];
+        stage?: string;
+    }) => void;
+
+    private previouslyActiveJobIds = new Set<string>();
 
     constructor(
         userId: string,
         onStateChange: (state: ImportServiceState) => void,
-        onLibrarySync: (changes: any[], isComplete: boolean) => void
+        onLibrarySync: (changes: any[], isComplete: boolean) => Promise<void> | void,
+        onJobFinished: (event: any) => void
     ) {
         this.userId = userId;
         this.onStateChange = onStateChange;
         this.onLibrarySync = onLibrarySync;
+        this.onJobFinished = onJobFinished;
 
         // Load sequence cursor from localStorage
         const storedSeq = localStorage.getItem(`anirec_sync_seq_${userId}`);
@@ -102,6 +114,31 @@ export class ImportSyncService {
         const active: ImportJob[] = data.jobs?.active || [];
         const queued: ImportJob[] = data.jobs?.queued || [];
         const history: ImportJob[] = data.jobs?.history || [];
+
+        // Track job completion events
+        const currentlyActiveIds = new Set([...active, ...queued].map(j => j.jobId));
+        
+        for (const prevId of this.previouslyActiveJobIds) {
+            if (!currentlyActiveIds.has(prevId)) {
+                // Find in history to get final status details
+                const finishedJob = history.find(j => j.jobId === prevId);
+                if (finishedJob) {
+                    try {
+                        this.onJobFinished({
+                            jobId: finishedJob.jobId,
+                            status: finishedJob.status,
+                            processed: finishedJob.processed,
+                            total: finishedJob.total,
+                            errors: finishedJob.errors,
+                            stage: finishedJob.stage,
+                        });
+                    } catch (e) {
+                        console.error('onJobFinished handler crashed:', e);
+                    }
+                }
+            }
+        }
+        this.previouslyActiveJobIds = currentlyActiveIds;
 
         // Primary job: first active job, or first queued job
         const primaryJob = active[0] || queued[0] || null;
@@ -151,9 +188,10 @@ export class ImportSyncService {
             }
 
             if (allChanges.length > 0) {
+                // Await merge handler before advancing local sequence cursor
+                await this.onLibrarySync(allChanges, true);
                 this.sinceSequence = currentSeq;
                 localStorage.setItem(`anirec_sync_seq_${this.userId}`, String(currentSeq));
-                this.onLibrarySync(allChanges, true);
             }
         } catch (err) {
             console.error('ImportSyncService: Delta sync failed:', err);

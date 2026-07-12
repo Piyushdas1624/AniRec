@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Star, Trash2, Edit3, Heart, BookOpen, Eye, CheckCircle, Clock, X, Upload, FileText, Download, Search, SortDesc, LayoutGrid, LayoutList, Plus, Dices, ArrowUp, User } from 'lucide-react';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
+import { useImport } from '../context/ImportContext';
 import AnimeDetailModal from '../components/AnimeDetailModal';
 import SmartImage from '../components/SmartImage';
 import malExportImg from '../assets/import/mal-export.png';
@@ -52,8 +53,17 @@ const OVERSCAN = 5;
 // SafeImage removed — using SmartImage from components for multi-source fallback
 
 export default function MyListPage() {
-    const [list, setList] = useState<ListItem[]>([]);
-    const [loading, setLoading] = useState(true);
+    const {
+        libraryList: list,
+        isLibraryLoading: loading,
+        loadLibrary,
+        updateLibraryEntry,
+        deleteLibraryEntry,
+        completedJobs,
+        primaryJob,
+        cancelJob
+    } = useImport();
+
     const [filter, setFilter] = useState<string>('all');
     const [searchQuery, setSearchQuery] = useState('');
     const [sortBy, setSortBy] = useState('recent');
@@ -92,7 +102,85 @@ export default function MyListPage() {
     const [failedError, setFailedError] = useState(0);
     const [jobWarnings, setJobWarnings] = useState<string[]>([]);
     const [jobErrors, setJobErrors] = useState<string[]>([]);
-    const cancelPollRef = useRef<(() => void) | null>(null);
+
+    // Pulsing animation for updated items
+    const [pulsedAnimeIds, setPulsedAnimeIds] = useState<Set<number>>(new Set());
+
+    useEffect(() => {
+        const handlePulse = (e: Event) => {
+            const ids = (e as CustomEvent).detail as number[];
+            setPulsedAnimeIds(prev => {
+                const next = new Set(prev);
+                for (const id of ids) next.add(id);
+                return next;
+            });
+            setTimeout(() => {
+                setPulsedAnimeIds(prev => {
+                    const next = new Set(prev);
+                    for (const id of ids) next.delete(id);
+                    return next;
+                });
+            }, 2000);
+        };
+        window.addEventListener('library:pulse', handlePulse);
+        return () => window.removeEventListener('library:pulse', handlePulse);
+    }, []);
+
+    // Bind primaryJob progress from ImportContext to local component states
+    useEffect(() => {
+        if (!primaryJob) {
+            if (activeJobId) {
+                const finished = completedJobs.find(j => j.jobId === activeJobId);
+                if (finished) {
+                    setImportPhase('done');
+                    setImportProgress(100);
+                    setImportEta(null);
+                    setImportResult({
+                        imported: finished.statistics.resolvedAniList + finished.statistics.resolvedJikan,
+                        skipped: finished.statistics.skippedAlreadyInList,
+                        failed: finished.statistics.failedNotFound + finished.statistics.failedError,
+                        results: (finished as any).results || []
+                    });
+                    setImporting(false);
+                    setActiveJobId(null);
+                } else {
+                    setImporting(false);
+                    setImportPhase(null);
+                    setImportResult(null);
+                    setActiveJobId(null);
+                }
+            }
+            return;
+        }
+
+        if (primaryJob.jobId === activeJobId || !activeJobId) {
+            if (!activeJobId) {
+                setActiveJobId(primaryJob.jobId);
+            }
+            setImporting(true);
+            
+            if (primaryJob.status === 'running') {
+                setImportPhase('processing');
+            } else if (primaryJob.status === 'pending') {
+                setImportPhase('processing');
+            } else {
+                setImportPhase(null);
+            }
+
+            const percent = primaryJob.total > 0 ? Math.min(100, Math.round((primaryJob.processed / primaryJob.total) * 100)) : 0;
+            setImportProgress(percent);
+            setImportStage(primaryJob.stage || '');
+            setCurrentAnime(primaryJob.currentAnime || '');
+            setResolvedAniList(primaryJob.statistics.resolvedAniList || 0);
+            setResolvedJikan(primaryJob.statistics.resolvedJikan || 0);
+            setSkippedAlreadyInList(primaryJob.statistics.skippedAlreadyInList || 0);
+            setFailedNotFound(primaryJob.statistics.failedNotFound || 0);
+            setFailedError(primaryJob.statistics.failedError || 0);
+            setImportEta((primaryJob as any).etaSeconds || null);
+            setJobWarnings(primaryJob.warnings || []);
+            setJobErrors(primaryJob.errors || []);
+        }
+    }, [primaryJob, completedJobs, activeJobId]);
     const [importFilter, setImportFilter] = useState<'all' | 'failed' | 'resolution'>('all');
     const [importLimit, setImportLimit] = useState(30);
     const [sheepCount, setSheepCount] = useState(0);
@@ -192,22 +280,21 @@ export default function MyListPage() {
 
     const loadList = async () => {
         try {
-            const { list: data } = await api.getMyList();
-            setList(data);
+            await loadLibrary();
             setLastUpdated(new Date());
         } catch (err: any) {
             toast.error('Failed to load list');
-        } finally {
-            setLoading(false);
         }
     };
 
     const handleDelete = async (id: string, e?: React.MouseEvent) => {
         e?.stopPropagation();
+        const item = list.find(i => i.id === id);
+        if (!item) return;
         if (!confirm('Remove this anime from your list?')) return;
         try {
             await api.removeFromList(id);
-            setList(prev => prev.filter(item => item.id !== id));
+            deleteLibraryEntry(item.animeId);
             toast.success('Removed from list');
         } catch (err: any) {
             toast.error('Failed to remove');
@@ -230,13 +317,11 @@ export default function MyListPage() {
                 notes: editNotes || undefined,
                 status: editStatus,
             });
-            setList(prev =>
-                prev.map(item =>
-                    item.id === editItem.id
-                        ? { ...item, rating: editRating, notes: editNotes, status: editStatus }
-                        : item
-                )
-            );
+            updateLibraryEntry(editItem.animeId, {
+                rating: editRating,
+                notes: editNotes,
+                status: editStatus,
+            });
             setEditItem(null);
             toast.success('Updated!');
         } catch (err: any) {
@@ -255,12 +340,16 @@ export default function MyListPage() {
             });
             await Promise.all(promises);
 
-            setList(prev => prev.filter(i => {
-                if (!selectedIds.has(i.id)) return true;
-                if (action === 'delete') return false;
-                i.status = action;
-                return true;
-            }));
+            selectedIds.forEach(id => {
+                const item = list.find(i => i.id === id);
+                if (item) {
+                    if (action === 'delete') {
+                        deleteLibraryEntry(item.animeId);
+                    } else {
+                        updateLibraryEntry(item.animeId, { status: action });
+                    }
+                }
+            });
 
             setSelectedIds(new Set());
             setSelectionMode(false);
@@ -285,9 +374,7 @@ export default function MyListPage() {
         e?.stopPropagation();
         try {
             await api.updateListItem(item.id, { favorite: !item.favorite });
-            setList(prev =>
-                prev.map(i => i.id === item.id ? { ...i, favorite: !i.favorite } : i)
-            );
+            updateLibraryEntry(item.animeId, { favorite: !item.favorite });
         } catch (err: any) {
             toast.error('Failed to update favorite');
         }
@@ -300,9 +387,7 @@ export default function MyListPage() {
 
         try {
             await api.updateListItem(item.id, { episodesWatched: eps + 1 });
-            setList(prev =>
-                prev.map(i => i.id === item.id ? { ...i, episodesWatched: eps + 1 } : i)
-            );
+            updateLibraryEntry(item.animeId, { episodesWatched: eps + 1 });
             toast.success(`Watched episode ${eps + 1}!`);
         } catch (err: any) {
             toast.error('Failed to update episode count');
@@ -336,102 +421,19 @@ export default function MyListPage() {
     };
 
     // Import handlers
-    const startPollingJob = (jobId: string) => {
-        setActiveJobId(jobId);
-        let backoffDelay = 500;
-        let pollTimer: any = null;
-        let isClosed = false;
-
-        const poll = async () => {
-            if (isClosed) return;
-            try {
-                const status = await api.getImportStatus(jobId);
-                
-                // Reset backoff delay on successful request
-                backoffDelay = 500;
-
-                setImportProgress(status.overallProgress);
-                setImportStage(status.stage || '');
-                setCurrentAnime(status.currentAnime || '');
-                setResolvedAniList(status.resolvedAniList || 0);
-                setResolvedJikan(status.resolvedJikan || 0);
-                setSkippedAlreadyInList(status.skippedAlreadyInList || 0);
-                setFailedNotFound(status.failedNotFound || 0);
-                setFailedError(status.failedError || 0);
-                setImportEta(status.etaSeconds);
-                setJobWarnings(status.warnings || []);
-                setJobErrors(status.errors || []);
-
-                if (status.status === 'completed') {
-                    setImportPhase('done');
-                    setImportProgress(100);
-                    setImportEta(null);
-                    
-                    const resultsList = status.results || [];
-                    setImportResult({
-                        imported: status.resolvedAniList + status.resolvedJikan,
-                        skipped: status.skippedAlreadyInList,
-                        failed: status.failedNotFound + status.failedError,
-                        results: resultsList
-                    });
-
-                    toast.success('Import complete!');
-                    setImporting(false);
-                    loadList();
-                    return;
-                }
-
-                if (status.status === 'failed' || status.status === 'cancelled' || status.status === 'abandoned') {
-                    setImportPhase(null);
-                    setImporting(false);
-                    setImportEta(null);
-                    
-                    let errorMsg = status.errors?.[status.errors.length - 1] || 'Import failed';
-                    if (status.status === 'cancelled') {
-                        errorMsg = 'Import cancelled by user';
-                    } else if (status.status === 'abandoned') {
-                        errorMsg = 'Import abandoned: server restarted';
-                    }
-                    toast.error(errorMsg);
-                    return;
-                }
-
-                pollTimer = setTimeout(poll, backoffDelay);
-            } catch (err: any) {
-                console.error('Polling error, backing off:', err);
-                backoffDelay = Math.min(8000, backoffDelay * 2);
-                pollTimer = setTimeout(poll, backoffDelay);
-            }
-        };
-
-        pollTimer = setTimeout(poll, backoffDelay);
-
-        return () => {
-            isClosed = true;
-            if (pollTimer) clearTimeout(pollTimer);
-        };
-    };
-
     const handleCancelImport = async () => {
         if (!activeJobId) return;
         try {
-            await api.cancelImport(activeJobId);
+            await cancelJob(activeJobId);
             toast('Cancelling import...');
-            if (cancelPollRef.current) cancelPollRef.current();
             setImporting(false);
             setImportPhase(null);
             setImportEta(null);
+            setActiveJobId(null);
         } catch (err: any) {
             toast.error(err.message || 'Failed to cancel import');
         }
     };
-
-    // Cleanup polling on unmount
-    useEffect(() => {
-        return () => {
-            if (cancelPollRef.current) cancelPollRef.current();
-        };
-    }, []);
 
     const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -454,10 +456,7 @@ export default function MyListPage() {
                 }
             });
 
-            // Start polling
-            const cleanupPoll = startPollingJob(uploadRes.jobId);
-            cancelPollRef.current = cleanupPoll;
-
+            setActiveJobId(uploadRes.jobId);
         } catch (err: any) {
             toast.error(err.message || 'Import failed');
             setImportPhase(null);
@@ -469,7 +468,6 @@ export default function MyListPage() {
     };
 
     const handleTextImport = async () => {
-        // Strip leading numbers/bullet points (e.g., "126 Unlimited Gacha" -> "Unlimited Gacha")
         const names = importText
             .split('\n')
             .map(n => n.replace(/^\s*\d+[\s.)-]+\s*/, '').trim())
@@ -488,7 +486,6 @@ export default function MyListPage() {
         setImportEta(names.length * 1.5); // Estimate 1.5s per item due to 429 buffers
 
         try {
-            // Process in chunks of 5 names to give faster UI updates and prevent dropping requests
             const CHUNK_SIZE = 5;
             let imported = 0;
             let failed = 0;
@@ -548,13 +545,8 @@ export default function MyListPage() {
         setJobErrors([]);
 
         try {
-            // First fetch the profile & start the job
             const startRes = await api.importAniListByUsername(username);
-
-            // Start polling
-            const cleanupPoll = startPollingJob(startRes.jobId);
-            cancelPollRef.current = cleanupPoll;
-
+            setActiveJobId(startRes.jobId);
         } catch (err: any) {
             toast.error(err.message || 'Failed to import from AniList');
             setImportPhase(null);
@@ -839,7 +831,7 @@ export default function MyListPage() {
                                 {(visibleItems as ListItem[]).map((item) => (
                                     <div
                                         key={item.id}
-                                        className={`list-item card list-item-interactive ${selectedIds.has(item.id) ? 'selected-border' : ''}`}
+                                        className={`list-item card list-item-interactive ${selectedIds.has(item.id) ? 'selected-border' : ''} ${pulsedAnimeIds.has(item.animeId) ? 'pulse-updated' : ''}`}
                                         style={{
                                             minHeight: 145,
                                             border: selectedIds.has(item.id) ? '2px solid var(--accent-primary)' : undefined
@@ -949,7 +941,7 @@ export default function MyListPage() {
                                         }}
                                     >
                                         {row.map(item => (
-                                            <div key={item.id} className="grid-card card" onClick={() => {
+                                            <div key={item.id} className={`grid-card card ${pulsedAnimeIds.has(item.animeId) ? 'pulse-updated' : ''}`} onClick={() => {
                                                 if (selectionMode) {
                                                     const newSet = new Set(selectedIds);
                                                     if (newSet.has(item.id)) newSet.delete(item.id);
