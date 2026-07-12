@@ -1103,11 +1103,11 @@ export default function MyListPage() {
 
             {/* Import Modal */}
             {showImport && (
-                <div className="modal-overlay" onClick={() => { if (!importing) { setShowImport(false); setImportResult(null); setImportPhase(null); } }}>
+                <div className="modal-overlay" onClick={() => { setShowImport(false); if (!importing) { setImportResult(null); setImportPhase(null); } }}>
                     <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
                         <div className="modal-header">
                             <h3 className="modal-title">📥 Import Anime List</h3>
-                            <button className="btn btn-icon btn-ghost" onClick={() => { if (!importing) { setShowImport(false); setImportResult(null); setImportPhase(null); } }}>
+                            <button className="btn btn-icon btn-ghost" onClick={() => { setShowImport(false); if (!importing) { setImportResult(null); setImportPhase(null); } }}>
                                 <X size={18} />
                             </button>
                         </div>
@@ -1164,14 +1164,34 @@ export default function MyListPage() {
                                                 ⏳ Estimated: ~{importEta >= 60 ? `${Math.floor(importEta / 60)}m ${Math.round(importEta % 60)}s` : `${Math.ceil(importEta)}s`}
                                             </div>
                                         )}
-                                        {importPhase === 'processing' && activeJobId && (
-                                            <button
-                                                className="btn btn-sm btn-ghost mt-3 text-red-500 hover:bg-red-500/10"
-                                                onClick={handleCancelImport}
-                                                style={{ color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)', padding: '4px 12px', borderRadius: 6, marginTop: 12 }}
-                                            >
-                                                Cancel Import
-                                            </button>
+                                        {importing && (
+                                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%' }}>
+                                                <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
+                                                    {importPhase === 'processing' && activeJobId && (
+                                                        <button
+                                                            className="btn btn-sm btn-ghost text-red-500 hover:bg-red-500/10"
+                                                            onClick={handleCancelImport}
+                                                            style={{ color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)', padding: '6px 12px', borderRadius: 6 }}
+                                                        >
+                                                            Cancel Import
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        className="btn btn-sm btn-gradient continue-bg-btn"
+                                                        onClick={() => {
+                                                            setShowImport(false);
+                                                            toast.success('Import is running in the background. You can continue using AniRec.', { id: 'bg-import-toast' });
+                                                            window.dispatchEvent(new CustomEvent('widget:highlight'));
+                                                        }}
+                                                        style={{ padding: '6px 16px', borderRadius: 6 }}
+                                                    >
+                                                        Continue in Background
+                                                    </button>
+                                                </div>
+                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: 8, textAlign: 'center' }}>
+                                                    ℹ️ You can safely close this window. Progress is available in the widget at the bottom right.
+                                                </div>
+                                            </div>
                                         )}
                                         {jobWarnings.length > 0 && (
                                             <div style={{ maxHeight: '80px', overflowY: 'auto', textAlign: 'left', fontSize: '0.75rem', color: '#f59e0b', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', padding: '6px 12px', borderRadius: 8, marginTop: 10, width: '100%' }}>

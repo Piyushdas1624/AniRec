@@ -179,3 +179,34 @@ test('ResolverCoordinator - AbortSignal cancellation', async () => {
         await ResolverCoordinator.resolveAnime(12345, 'Cancelled Anime', 'TV', 12, controller.signal);
     }, /AbortError/, 'should reject immediately with AbortError if signal is aborted');
 });
+
+test('Status Normalization - Mapping preservation and fallbacks', () => {
+    const { normalizeStatus } = require('../../routes/import');
+
+    assert.strictEqual(normalizeStatus('watching'), 'watching');
+    assert.strictEqual(normalizeStatus('completed'), 'completed');
+    assert.strictEqual(normalizeStatus('planning'), 'planning');
+    assert.strictEqual(normalizeStatus('paused'), 'paused');
+    assert.strictEqual(normalizeStatus('dropped'), 'dropped');
+
+    assert.strictEqual(normalizeStatus('Watching'), 'watching');
+    assert.strictEqual(normalizeStatus('COMPLETED'), 'completed');
+    assert.strictEqual(normalizeStatus('Plan to Watch'), 'planning');
+    assert.strictEqual(normalizeStatus('On-Hold'), 'paused');
+    assert.strictEqual(normalizeStatus('Dropped'), 'dropped');
+
+    assert.strictEqual(normalizeStatus('CURRENT'), 'watching');
+    assert.strictEqual(normalizeStatus('PLANNING'), 'planning');
+    assert.strictEqual(normalizeStatus('REPEATING'), 'watching');
+
+    assert.strictEqual(normalizeStatus(0), 'watching');
+    assert.strictEqual(normalizeStatus(1), 'planning');
+    assert.strictEqual(normalizeStatus(2), 'completed');
+    assert.strictEqual(normalizeStatus(3), 'dropped');
+    assert.strictEqual(normalizeStatus(4), 'paused');
+    assert.strictEqual(normalizeStatus(5), 'watching');
+
+    assert.strictEqual(normalizeStatus('invalid-status-string'), 'planning');
+    assert.strictEqual(normalizeStatus(null), 'planning');
+    assert.strictEqual(normalizeStatus(undefined), 'planning');
+});

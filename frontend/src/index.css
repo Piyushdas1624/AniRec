@@ -1616,4 +1616,20 @@ img {
     border-color: rgba(124, 92, 252, 0.15);
     box-shadow: 0 0 0 0 rgba(124, 92, 252, 0);
   }
+}
+
+.widget-highlight-pulse {
+  animation: widget-pulse 1s ease-in-out 3;
+}
+
+@keyframes widget-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(124, 92, 252, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(124, 92, 252, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(124, 92, 252, 0);
+  }
 }

@@ -75,6 +75,38 @@ const MAL_STATUS_MAP: Record<string, string> = {
     'Plan to Read': 'planning',
 };
 
+export function normalizeStatus(rawStatus: any): string {
+    if (rawStatus === null || rawStatus === undefined) return 'planning';
+    const s = String(rawStatus).trim().toLowerCase();
+    
+    if (['planning', 'watching', 'completed', 'paused', 'dropped'].includes(s)) {
+        return s;
+    }
+    
+    const map: Record<string, string> = {
+        'current': 'watching',
+        'planning': 'planning',
+        'completed': 'completed',
+        'paused': 'paused',
+        'dropped': 'dropped',
+        'repeating': 'watching',
+        'rewatching': 'watching',
+        'on-hold': 'paused',
+        'on hold': 'paused',
+        'watching': 'watching',
+        'plan to watch': 'planning',
+        'plan to read': 'planning',
+        '0': 'watching',
+        '1': 'planning',
+        '2': 'completed',
+        '3': 'dropped',
+        '4': 'paused',
+        '5': 'watching'
+    };
+
+    return map[s] || 'planning';
+}
+
 // Simple XML parser for MAL format (no external dependency needed)
 function parseMALXml(xmlString: string): {
     entries: {
@@ -117,7 +149,7 @@ function parseMALXml(xmlString: string): {
             episodes: parseInt(get('series_episodes')) || 0,
             watchedEpisodes: parseInt(get('my_watched_episodes')) || 0,
             score: parseInt(get('my_score')) || 0,
-            status: MAL_STATUS_MAP[get('my_status')] || 'planning',
+            status: normalizeStatus(get('my_status')),
             comments: get('my_comments'),
             tags: get('my_tags'),
             startDate: get('my_start_date'),
@@ -231,7 +263,7 @@ function parseAniListJson(jsonData: any): {
             entries.push({
                 anilistId: entry.series_id,
                 title: '', // Will be filled from AniList API during import
-                status: ANILIST_RAW_STATUS_MAP[entry.status] || 'planning',
+                status: normalizeStatus(entry.status),
                 score: normalizedScore,
                 progress: entry.progress || 0,
                 notes: (entry.notes || '').trim(),
@@ -257,7 +289,7 @@ function parseAniListJson(jsonData: any): {
                     entries.push({
                         anilistId: entry.media?.id || entry.mediaId || entry.id,
                         title: entry.media?.title?.english || entry.media?.title?.romaji || entry.title || '',
-                        status: ANILIST_GQL_STATUS_MAP[entry.status || list.status || 'PLANNING'] || 'planning',
+                        status: normalizeStatus(entry.status || list.status),
                         score: entry.score || entry.scoreRaw || 0,
                         progress: entry.progress || 0,
                         notes: entry.notes || '',
@@ -636,7 +668,7 @@ async function runMALXmlImportBackground(jobId: string, entries: any[], userId: 
             dbFlusher.enqueue({
                 id,
                 animeId: animeDbId,
-                status: MAL_STATUS_MAP[entry.status] || 'planning',
+                status: normalizeStatus(entry.status),
                 rating: entry.score > 0 ? entry.score : null,
                 notes,
                 episodesWatched: entry.watchedEpisodes
@@ -815,7 +847,7 @@ async function runAniListImportBackground(jobId: string, entries: any[], userId:
             dbFlusher.enqueue({
                 id,
                 animeId: dbEntry.id,
-                status: entry.status,
+                status: normalizeStatus(entry.status),
                 rating: entry.score > 0 ? entry.score : null,
                 notes: entry.notes || null,
                 episodesWatched: entry.progress
