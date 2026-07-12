@@ -81,6 +81,134 @@ function normalizeJikanToResponse(j: any) {
 // LIST ROUTES — MUST come BEFORE /:id to avoid conflicts
 // =====================================================
 
+// Helper to record manual user list updates into sync logs
+function recordManualSync(userId: string, animeId: number, action: 'upsert' | 'delete') {
+    try {
+        db.transaction(() => {
+            const state = db.prepare('SELECT version FROM library_state WHERE user_id = ?').get(userId) as any;
+            const nextVersion = (state ? state.version : 0) + 1;
+            
+            db.prepare(`
+                INSERT INTO library_state (user_id, version, last_updated)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(user_id) DO UPDATE SET
+                    version = excluded.version,
+                    last_updated = excluded.last_updated
+            `).run(userId, nextVersion);
+
+            db.prepare(`
+                INSERT INTO library_sync_log (user_id, revision, anime_id, action)
+                VALUES (?, ?, ?, ?)
+            `).run(userId, nextVersion, animeId, action);
+        })();
+    } catch (e) {
+        console.error('Failed to record manual sync log:', e);
+    }
+}
+
+// =====================================================
+// LIST ROUTES — MUST come BEFORE /:id to avoid conflicts
+// =====================================================
+
+// GET /api/anime/library/delta - Fetch keyset-paginated library updates since sequence
+router.get('/library/delta', authMiddleware, (req: AuthRequest, res: Response) => {
+    try {
+        const userId = req.userId;
+        const sinceSequence = parseInt(req.query.sinceSequence as string || '0', 10);
+        const limit = Math.min(parseInt(req.query.limit as string || '100', 10), 500);
+
+        const logs = db.prepare(`
+            SELECT 
+                l.sequence, 
+                l.anime_id, 
+                l.action, 
+                l.created_at as log_created_at,
+                ua.id as user_anime_id,
+                ua.status,
+                ua.rating,
+                ua.notes,
+                ua.favorite,
+                ua.episodes_watched,
+                ua.added_at,
+                ua.updated_at,
+                a.title_romaji,
+                a.title_english,
+                a.cover_image,
+                a.banner_image,
+                a.synopsis,
+                a.genres,
+                a.tags,
+                a.ai_tags,
+                a.episodes,
+                a.status as anime_status,
+                a.average_score,
+                a.format,
+                a.season_year,
+                a.anilist_id,
+                a.mal_id
+            FROM library_sync_log l
+            LEFT JOIN user_anime ua ON ua.user_id = l.user_id AND ua.anime_id = l.anime_id
+            LEFT JOIN anime a ON a.id = l.anime_id
+            WHERE l.user_id = ? AND l.sequence > ?
+            ORDER BY l.sequence ASC
+            LIMIT ?
+        `).all(userId, sinceSequence, limit) as any[];
+
+        const changes = logs.map(item => {
+            if (item.action === 'delete') {
+                return {
+                    sequence: item.sequence,
+                    animeId: item.anime_id,
+                    action: 'delete'
+                };
+            }
+            return {
+                sequence: item.sequence,
+                animeId: item.anime_id,
+                action: item.action,
+                entry: {
+                    id: item.user_anime_id,
+                    animeId: item.anime_id,
+                    anilistId: item.anilist_id,
+                    malId: item.mal_id,
+                    title: item.title_english || item.title_romaji,
+                    titleRomaji: item.title_romaji,
+                    coverImage: item.cover_image,
+                    bannerImage: item.banner_image,
+                    synopsis: item.synopsis,
+                    genres: JSON.parse(item.genres || '[]'),
+                    tags: JSON.parse(item.tags || '[]'),
+                    aiTags: JSON.parse(item.ai_tags || '[]'),
+                    episodes: item.episodes,
+                    animeStatus: item.anime_status,
+                    averageScore: item.average_score,
+                    format: item.format,
+                    seasonYear: item.season_year,
+                    status: item.status,
+                    rating: item.rating,
+                    notes: item.notes,
+                    favorite: item.favorite === 1,
+                    episodesWatched: item.episodes_watched,
+                    addedAt: item.added_at,
+                    updatedAt: item.updated_at,
+                }
+            };
+        });
+
+        const hasMore = changes.length === limit;
+        const nextSequence = changes.length > 0 ? changes[changes.length - 1].sequence : null;
+
+        res.json({
+            nextSequence,
+            hasMore,
+            changes
+        });
+    } catch (error: any) {
+        console.error('Get library delta error:', error);
+        res.status(500).json({ error: 'Failed to get library delta updates' });
+    }
+});
+
 // POST /api/anime/list/add
 router.post('/list/add', authMiddleware, (req: AuthRequest, res: Response) => {
     try {
@@ -103,6 +231,8 @@ router.post('/list/add', authMiddleware, (req: AuthRequest, res: Response) => {
         db.prepare(`
       INSERT INTO user_anime (id, user_id, anime_id, status) VALUES (?, ?, ?, ?)
     `).run(id, req.userId, animeId, status);
+
+        recordManualSync(req.userId || '', animeId, 'upsert');
 
         res.status(201).json({ id, animeId, status, entry: { id, status } });
     } catch (error: any) {
@@ -165,7 +295,7 @@ router.put('/list/:id', authMiddleware, (req: AuthRequest, res: Response) => {
         const { rating, notes, status, favorite, episodesWatched, startDate, endDate, tags } = req.body;
         const entryId = req.params.id as string;
 
-        const existing = db.prepare('SELECT id FROM user_anime WHERE id = ? AND user_id = ?')
+        const existing = db.prepare('SELECT id, anime_id FROM user_anime WHERE id = ? AND user_id = ?')
             .get(entryId, req.userId) as any;
 
         if (!existing) {
@@ -189,6 +319,8 @@ router.put('/list/:id', authMiddleware, (req: AuthRequest, res: Response) => {
             updates.push("updated_at = datetime('now')");
             values.push(entryId);
             db.prepare(`UPDATE user_anime SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+
+            recordManualSync(req.userId || '', existing.anime_id, 'upsert');
         }
 
         res.json({ success: true });
@@ -199,13 +331,17 @@ router.put('/list/:id', authMiddleware, (req: AuthRequest, res: Response) => {
 });
 
 // DELETE /api/anime/list — Delete ENTIRE list (no :id param!)
-// MUST be before DELETE /list/:id so "/list" doesn't match ":id"
 router.delete('/list', authMiddleware, (req: AuthRequest, res: Response) => {
-    // Extra check: if there's no additional path, this is "delete all"
     try {
-        const result = db.prepare('DELETE FROM user_anime WHERE user_id = ?').run(req.userId);
-        console.log(`Deleted ${result.changes} anime entries for user ${req.userId}`);
-        res.json({ success: true, deleted: result.changes });
+        const entries = db.prepare('SELECT anime_id FROM user_anime WHERE user_id = ?').all(req.userId) as any[];
+        db.prepare('DELETE FROM user_anime WHERE user_id = ?').run(req.userId);
+
+        for (const item of entries) {
+            recordManualSync(req.userId || '', item.anime_id, 'delete');
+        }
+
+        console.log(`Deleted ${entries.length} anime entries for user ${req.userId}`);
+        res.json({ success: true, deleted: entries.length });
     } catch (error: any) {
         console.error('Delete list error:', error);
         res.status(500).json({ error: 'Failed to delete list' });
@@ -215,13 +351,18 @@ router.delete('/list', authMiddleware, (req: AuthRequest, res: Response) => {
 // DELETE /api/anime/list/:id — Delete a single entry
 router.delete('/list/:id', authMiddleware, (req: AuthRequest, res: Response) => {
     try {
-        const result = db.prepare('DELETE FROM user_anime WHERE id = ? AND user_id = ?')
-            .run(req.params.id, req.userId);
+        const existing = db.prepare('SELECT anime_id FROM user_anime WHERE id = ? AND user_id = ?')
+            .get(req.params.id, req.userId) as any;
 
-        if (result.changes === 0) {
+        if (!existing) {
             res.status(404).json({ error: 'Anime not found in your list' });
             return;
         }
+
+        db.prepare('DELETE FROM user_anime WHERE id = ? AND user_id = ?')
+            .run(req.params.id, req.userId);
+
+        recordManualSync(req.userId || '', existing.anime_id, 'delete');
 
         res.json({ success: true });
     } catch (error: any) {

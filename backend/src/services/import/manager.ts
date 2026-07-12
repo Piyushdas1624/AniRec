@@ -269,22 +269,31 @@ export class ImportManager {
     }
 
     public async shutdown(): Promise<void> {
+        console.log('ImportManager: Shutting down active import jobs...');
+        
         this.scheduler.stop();
-        
-        // Abort all active jobs
-        for (const [jobId, state] of this.activeJobs.entries()) {
-            state.job.status = 'abandoned';
-            state.job.completedAt = Date.now();
-            state.job.errors.push('Application shutting down');
-            
-            if (state.job.abortController) {
-                state.job.abortController.abort();
-            }
-            
-            ImportRepository.saveJob(state.job);
+
+        for (const jobId of this.activeJobs.keys()) {
+            this.cancelJob(jobId);
         }
-        
-        this.activeJobs.clear();
+
+        const startTime = Date.now();
+        while (this.activeJobs.size > 0 && (Date.now() - startTime < 15000)) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        if (this.activeJobs.size > 0) {
+            console.warn(`ImportManager: Shutdown timed out. ${this.activeJobs.size} jobs did not terminate gracefully.`);
+            for (const [jobId, state] of this.activeJobs.entries()) {
+                state.job.status = 'abandoned';
+                state.job.completedAt = Date.now();
+                state.job.errors.push('Graceful shutdown timeout');
+                ImportRepository.saveJob(state.job);
+            }
+            this.activeJobs.clear();
+        } else {
+            console.log('ImportManager: All active jobs terminated gracefully.');
+        }
         this.cachedSnapshots.clear();
     }
 

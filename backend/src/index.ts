@@ -128,8 +128,47 @@ function findAvailablePort(startPort: number): Promise<number> {
     });
 }
 
+import { getImportManager } from './services/import';
+import db from './utils/db';
+
+let serverInstance: any = null;
+let isShuttingDown = false;
+
+async function gracefulShutdown(signal: string) {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    
+    console.log(`\n🛑 Received ${signal}. Starting graceful shutdown...`);
+
+    if (serverInstance) {
+        serverInstance.close(() => {
+            console.log('HTTP server closed.');
+        });
+    }
+
+    try {
+        await getImportManager().shutdown();
+    } catch (err) {
+        console.error('Error during ImportManager shutdown:', err);
+    }
+
+    try {
+        console.log('Closing database connection...');
+        db.close();
+        console.log('Database connection closed.');
+    } catch (err) {
+        console.error('Error closing database connection:', err);
+    }
+
+    console.log('Graceful shutdown completed. Exiting process.');
+    process.exit(0);
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
 findAvailablePort(PORT).then((availablePort) => {
-    app.listen(availablePort, () => {
+    serverInstance = app.listen(availablePort, () => {
         console.log(`
   🚀 Anime Recommender API server running!
   📡 http://localhost:${availablePort}

@@ -150,6 +150,19 @@ class ApiClient {
         });
     }
 
+    async getLibraryDelta(sinceSequence: number, limit = 100) {
+        return this.request<{
+            nextSequence: number | null;
+            hasMore: boolean;
+            changes: {
+                sequence: number;
+                animeId: number;
+                action: 'upsert' | 'delete';
+                entry?: any;
+            }[];
+        }>(`/anime/library/delta?sinceSequence=${sinceSequence}&limit=${limit}`);
+    }
+
     // Gemini — accepts either API key string, Antigravity auth object, or null (for guests using shared session)
     private buildAuthBody(auth: string | { accessToken: string; projectId: string } | null): Record<string, any> {
         if (!auth) return {}; // Guest mode — backend injects shared tokens
