@@ -314,6 +314,12 @@ class ApiClient {
         });
     }
 
+    async getConsolidatedStatus() {
+        return this.request<any>('/import/status', {
+            method: 'GET',
+        });
+    }
+
     async cancelImport(jobId: string) {
         return this.request<any>(`/import/cancel/${jobId}`, {
             method: 'POST',

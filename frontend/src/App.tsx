@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate, useSearchParams } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { ImportProvider } from './context/ImportContext';
 import Navbar from './components/Navbar';
 import GuestBanner from './components/GuestBanner';
 import LoginPage from './pages/LoginPage';
@@ -108,28 +109,30 @@ export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <InviteCapture />
-        <InviteJoiner />
-        <Routes>
-          <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
-          <Route path="/signup" element={<PublicRoute><SignupPage /></PublicRoute>} />
-          <Route path="/*" element={<AppLayout />} />
-        </Routes>
-        <Toaster
-          position="top-right"
-          toastOptions={{
-            duration: 3000,
-            style: {
-              background: '#1a1a3e',
-              color: '#f0f0ff',
-              border: '1px solid rgba(124, 92, 252, 0.2)',
-              borderRadius: '12px',
-              fontSize: '0.9rem',
-            },
-            success: { iconTheme: { primary: '#22c55e', secondary: '#1a1a3e' } },
-            error: { iconTheme: { primary: '#ef4444', secondary: '#1a1a3e' } },
-          }}
-        />
+        <ImportProvider>
+          <InviteCapture />
+          <InviteJoiner />
+          <Routes>
+            <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
+            <Route path="/signup" element={<PublicRoute><SignupPage /></PublicRoute>} />
+            <Route path="/*" element={<AppLayout />} />
+          </Routes>
+          <Toaster
+            position="top-right"
+            toastOptions={{
+              duration: 3000,
+              style: {
+                background: '#1a1a3e',
+                color: '#f0f0ff',
+                border: '1px solid rgba(124, 92, 252, 0.2)',
+                borderRadius: '12px',
+                fontSize: '0.9rem',
+              },
+              success: { iconTheme: { primary: '#22c55e', secondary: '#1a1a3e' } },
+              error: { iconTheme: { primary: '#ef4444', secondary: '#1a1a3e' } },
+            }}
+          />
+        </ImportProvider>
       </AuthProvider>
     </BrowserRouter>
   );
