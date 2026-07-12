@@ -59,8 +59,20 @@ const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 200,
     message: { error: 'Too many requests, please try again later' },
+    skip: (req) => {
+        return req.originalUrl.includes('/import/status') || req.originalUrl.includes('/session/guest-status');
+    }
 });
 app.use(limiter);
+
+// Status rate limiter (bypass standard limits to allow persistent widgets polling)
+const statusLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 3000,
+    message: { error: 'Too many status queries, please try again later' },
+});
+app.use('/api/import/status', statusLimiter);
+app.use('/api/session/guest-status', statusLimiter);
 
 // Stricter rate limit for auth routes
 const authLimiter = rateLimit({

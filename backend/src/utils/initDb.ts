@@ -150,7 +150,52 @@ export function initializeDatabase(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_shared_sessions_invite ON shared_sessions(invite_token);
     CREATE INDEX IF NOT EXISTS idx_session_guests_guest ON session_guests(guest_user_id);
     CREATE INDEX IF NOT EXISTS idx_session_guests_session ON session_guests(session_id);
+
+    -- Import jobs tracking table (job history/final state persistence)
+    CREATE TABLE IF NOT EXISTS import_jobs (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      stage TEXT,
+      processed INTEGER DEFAULT 0,
+      total INTEGER DEFAULT 0,
+      result_json TEXT,
+      error TEXT,
+      started_at TEXT DEFAULT (datetime('now')),
+      completed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_import_jobs_user ON import_jobs(user_id);
+
+    -- Library state tracking
+    CREATE TABLE IF NOT EXISTS library_state (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      version INTEGER DEFAULT 0,
+      last_updated TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Library synchronization log
+    CREATE TABLE IF NOT EXISTS library_sync_log (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      revision INTEGER NOT NULL,
+      anime_id INTEGER NOT NULL REFERENCES anime(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_library_sync_log_user_seq ON library_sync_log(user_id, sequence);
   `);
+
+  // Cleanup stale jobs from previous run (marked as abandoned)
+  try {
+    db.prepare(`
+      UPDATE import_jobs 
+      SET status = 'abandoned', error = 'Server restarted during processing' 
+      WHERE status IN ('pending', 'running')
+    `).run();
+    console.log('🧹 Cleaned up stale running/pending import jobs');
+  } catch (err: any) {
+    console.error('Failed to cleanup stale jobs:', err.message);
+  }
 
   console.log('✅ Database initialized successfully');
   return db;
