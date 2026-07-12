@@ -102,6 +102,14 @@ export class ImportSyncService {
         this.transport.stop();
     }
 
+    public pause(): void {
+        this.transport.pause();
+    }
+
+    public resume(): void {
+        this.transport.resume();
+    }
+
     public async cancelJob(jobId: string): Promise<void> {
         try {
             await api.cancelImport(jobId);

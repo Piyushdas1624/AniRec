@@ -178,7 +178,40 @@ export function ImportProvider({ children }: { children: React.ReactNode }) {
         serviceRef.current = service;
         service.start();
 
+        if (document.hidden || !navigator.onLine) {
+            service.pause();
+        }
+
+        const handleVisibilityChange = () => {
+            if (document.hidden) {
+                service.pause();
+            } else {
+                service.resume();
+            }
+        };
+
+        const handleOnline = () => {
+            service.resume();
+        };
+
+        const handleOffline = () => {
+            service.pause();
+        };
+
+        const handleFocus = () => {
+            service.resume();
+        };
+
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+        window.addEventListener('focus', handleFocus);
+
         return () => {
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            window.removeEventListener('online', handleOnline);
+            window.removeEventListener('offline', handleOffline);
+            window.removeEventListener('focus', handleFocus);
             if (serviceRef.current) {
                 serviceRef.current.stop();
                 serviceRef.current = null;

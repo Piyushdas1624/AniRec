@@ -11,6 +11,9 @@ export interface Transport {
     start(): void;
     stop(): void;
     updateInterval(ms: number): void;
+    pause(): void;
+    resume(): void;
+    forcePoll(): Promise<void>;
 }
 
 export class PollingTransport implements Transport {
@@ -20,6 +23,7 @@ export class PollingTransport implements Transport {
     private maxIntervalMs = 10000;
     private timer: any = null;
     private isRunning = false;
+    private isPaused = false;
 
     public subscribe(listener: TransportListener): void {
         this.listeners.add(listener);
@@ -32,20 +36,44 @@ export class PollingTransport implements Transport {
     public start(): void {
         if (this.isRunning) return;
         this.isRunning = true;
+        this.isPaused = false;
         this.schedulePoll();
     }
 
     public stop(): void {
         this.isRunning = false;
+        this.isPaused = false;
         if (this.timer) {
             clearTimeout(this.timer);
             this.timer = null;
         }
     }
 
+    public pause(): void {
+        this.isPaused = true;
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
+        }
+    }
+
+    public resume(): void {
+        if (!this.isPaused) return;
+        this.isPaused = false;
+        if (this.isRunning) {
+            this.poll();
+        }
+    }
+
+    public async forcePoll(): Promise<void> {
+        if (!this.isRunning || this.isPaused) return;
+        if (this.timer) clearTimeout(this.timer);
+        await this.poll();
+    }
+
     public updateInterval(ms: number): void {
         this.intervalMs = Math.max(this.minIntervalMs, Math.min(ms, this.maxIntervalMs));
-        if (this.isRunning) {
+        if (this.isRunning && !this.isPaused) {
             if (this.timer) clearTimeout(this.timer);
             this.schedulePoll();
         }
@@ -53,11 +81,12 @@ export class PollingTransport implements Transport {
 
     private schedulePoll(): void {
         if (this.timer) clearTimeout(this.timer);
+        if (!this.isRunning || this.isPaused) return;
         this.timer = setTimeout(() => this.poll(), this.intervalMs);
     }
 
     private async poll(): Promise<void> {
-        if (!this.isRunning) return;
+        if (!this.isRunning || this.isPaused) return;
 
         try {
             const data = await api.getConsolidatedStatus();
@@ -89,7 +118,7 @@ export class PollingTransport implements Transport {
             this.intervalMs = this.maxIntervalMs;
         }
 
-        if (this.isRunning) {
+        if (this.isRunning && !this.isPaused) {
             this.schedulePoll();
         }
     }
