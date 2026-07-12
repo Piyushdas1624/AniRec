@@ -16,7 +16,16 @@ import importRoutes from './routes/import';
 import adminRoutes from './routes/admin';
 
 const app = express();
-app.set('trust proxy', 1); // Trust first proxy (e.g. Cloudflare, ngrok) to fix rate-limit warnings
+const trustProxy = process.env.TRUST_PROXY;
+if (trustProxy === 'true') {
+    app.set('trust proxy', true);
+} else if (trustProxy === 'false') {
+    app.set('trust proxy', false);
+} else if (trustProxy && !isNaN(Number(trustProxy))) {
+    app.set('trust proxy', Number(trustProxy));
+} else {
+    app.set('trust proxy', false); // Secure by default
+}
 const PORT = parseInt(process.env.PORT || '3001');
 
 // Middleware

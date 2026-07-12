@@ -23,16 +23,25 @@ export interface JikanAnime {
     rating: string | null;
 }
 
-// Rate limiting: Jikan allows ~3 requests/sec
-let lastRequestTime = 0;
+// Rate limiting: Jikan allows ~3 requests/sec. We use a serialized promise queue
+// to ensure concurrent requests wait their turn with a strict 400ms pacing.
+const REQUEST_INTERVAL = 400;
+let requestQueue: Promise<any> = Promise.resolve();
+
 async function rateLimitedFetch(url: string): Promise<Response> {
-    const now = Date.now();
-    const timeSinceLastRequest = now - lastRequestTime;
-    if (timeSinceLastRequest < 400) {
-        await new Promise(resolve => setTimeout(resolve, 400 - timeSinceLastRequest));
-    }
-    lastRequestTime = Date.now();
-    return fetch(url);
+    const resultPromise = requestQueue.then(async () => {
+        try {
+            return await fetch(url);
+        } finally {
+            // Strict pacing: always delay the next request by 400ms, even if this request fails
+            await new Promise(resolve => setTimeout(resolve, REQUEST_INTERVAL));
+        }
+    });
+
+    // Chain the catch to prevent failures from permanently stalling the queue
+    requestQueue = resultPromise.catch(() => {});
+
+    return resultPromise;
 }
 
 export async function searchAnimeJikan(query: string, page = 1): Promise<{ data: JikanAnime[]; hasNextPage: boolean }> {

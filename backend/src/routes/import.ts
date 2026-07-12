@@ -365,6 +365,8 @@ async function batchImportAnilistEntries(
 
     console.log(`[Batch Import] ${allIds.length} unique IDs: ${dbExisting.size} in DB, ${missingIds.length} to fetch from AniList API`);
 
+    const fetchedMediaList: any[] = [];
+
     for (let i = 0; i < missingIds.length; i += BATCH_SIZE) {
         const batch = missingIds.slice(i, i + BATCH_SIZE);
         try {
@@ -374,16 +376,13 @@ async function batchImportAnilistEntries(
             const mediaList = await getAnimeByIds(batch);
             console.log(`[Batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(missingIds.length / BATCH_SIZE)}] Fetched ${mediaList.length}/${batch.length} anime from AniList API`);
 
-            // Store each fetched anime in DB
+            // Store each fetched anime in memory list
             const fetchedIds = new Set<number>();
             for (const media of mediaList) {
-                const dbId = upsertAnimeFromMedia(media);
-                if (dbId) {
-                    const title = media.title?.english || media.title?.romaji || `AniList #${media.id}`;
-                    dbExisting.set(media.id, { id: dbId, titleEnglish: media.title?.english, titleRomaji: media.title?.romaji });
-                    titleMap.set(media.id, title);
-                    fetchedIds.add(media.id);
-                }
+                fetchedMediaList.push(media);
+                const title = media.title?.english || media.title?.romaji || `AniList #${media.id}`;
+                titleMap.set(media.id, title);
+                fetchedIds.add(media.id);
             }
 
             // Mark unfound IDs in this batch
@@ -401,11 +400,9 @@ async function batchImportAnilistEntries(
                 try {
                     const mediaList = await getAnimeByIds(batch);
                     for (const media of mediaList) {
-                        const dbId = upsertAnimeFromMedia(media);
-                        if (dbId) {
-                            dbExisting.set(media.id, { id: dbId, titleEnglish: media.title?.english, titleRomaji: media.title?.romaji });
-                            titleMap.set(media.id, media.title?.english || media.title?.romaji || `AniList #${media.id}`);
-                        }
+                        fetchedMediaList.push(media);
+                        const title = media.title?.english || media.title?.romaji || `AniList #${media.id}`;
+                        titleMap.set(media.id, title);
                     }
                 } catch (retryErr) {
                     console.warn('[Batch Import] Retry also failed:', retryErr);
@@ -414,44 +411,58 @@ async function batchImportAnilistEntries(
         }
     }
 
-    // 4. Now process each entry (all DB lookups, no more API calls!)
-    for (const entry of entries) {
-        try {
-            if (!entry.anilistId) continue;
-
-            const dbEntry = dbExisting.get(entry.anilistId);
-            const displayTitle = entry.title || titleMap.get(entry.anilistId) || `AniList #${entry.anilistId}`;
-
-            if (!dbEntry) {
-                failed++;
-                results.push({ title: displayTitle, status: 'failed', result: 'Not found on AniList' });
-                continue;
+    // 4. Now process each entry inside a single database transaction (synchronous writes)
+    const runImportTransaction = db.transaction(() => {
+        // First upsert all fetched media metadata into the 'anime' table
+        for (const media of fetchedMediaList) {
+            const dbId = upsertAnimeFromMedia(media);
+            if (dbId) {
+                dbExisting.set(media.id, { id: dbId, titleEnglish: media.title?.english, titleRomaji: media.title?.romaji });
+                titleMap.set(media.id, media.title?.english || media.title?.romaji || `AniList #${media.id}`);
             }
-
-            const existing = db.prepare('SELECT id FROM user_anime WHERE user_id = ? AND anime_id = ?')
-                .get(userId, dbEntry.id) as any;
-
-            if (existing) {
-                skipped++;
-                results.push({ title: displayTitle, status: 'skipped', result: 'Already in list' });
-                continue;
-            }
-
-            const id = uuidv4();
-            db.prepare(`
-                INSERT INTO user_anime (id, user_id, anime_id, status, rating, notes, episodes_watched)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            `).run(id, userId, dbEntry.id, entry.status,
-                entry.score > 0 ? entry.score : null, entry.notes || null, entry.progress);
-
-            imported++;
-            results.push({ title: displayTitle, status: entry.status, result: 'imported' });
-        } catch (err: any) {
-            const displayTitle = entry.title || titleMap.get(entry.anilistId) || `AniList #${entry.anilistId}`;
-            failed++;
-            results.push({ title: displayTitle, status: 'error', result: err.message });
         }
-    }
+
+        // Now process user list entries
+        for (const entry of entries) {
+            try {
+                if (!entry.anilistId) continue;
+
+                const dbEntry = dbExisting.get(entry.anilistId);
+                const displayTitle = entry.title || titleMap.get(entry.anilistId) || `AniList #${entry.anilistId}`;
+
+                if (!dbEntry) {
+                    failed++;
+                    results.push({ title: displayTitle, status: 'failed', result: 'Not found on AniList' });
+                    continue;
+                }
+
+                const existing = db.prepare('SELECT id FROM user_anime WHERE user_id = ? AND anime_id = ?')
+                    .get(userId, dbEntry.id) as any;
+
+                if (existing) {
+                    skipped++;
+                    results.push({ title: displayTitle, status: 'skipped', result: 'Already in list' });
+                    continue;
+                }
+
+                const id = uuidv4();
+                db.prepare(`
+                    INSERT INTO user_anime (id, user_id, anime_id, status, rating, notes, episodes_watched)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                `).run(id, userId, dbEntry.id, entry.status,
+                    entry.score > 0 ? entry.score : null, entry.notes || null, entry.progress);
+
+                imported++;
+                results.push({ title: displayTitle, status: entry.status, result: 'imported' });
+            } catch (err: any) {
+                const displayTitle = entry.title || titleMap.get(entry.anilistId) || `AniList #${entry.anilistId}`;
+                failed++;
+                results.push({ title: displayTitle, status: 'error', result: err.message });
+            }
+        }
+    });
+
+    runImportTransaction();
 
     return { imported, skipped, failed, results };
 }
@@ -496,44 +507,67 @@ router.post('/file', authMiddleware, upload.single('file'), async (req: AuthRequ
             const { entries, userInfo } = parseMALXml(content);
             console.log(`Importing ${entries.length} anime from MAL export (user: ${userInfo.username})`);
 
+            // 1. Fetch/Resolve all Anime IDs asynchronously first
+            const entryDbIds = new Map<number, number>();
             for (const entry of entries) {
                 try {
-                    const animeDbId = await upsertAnimeByMalId(entry.malId, entry.title, entry.type, entry.episodes);
-                    if (!animeDbId) {
-                        failed++;
-                        results.push({ title: entry.title, status: 'failed', result: 'Could not find anime' });
-                        continue;
+                    const existingAnime = db.prepare('SELECT id FROM anime WHERE mal_id = ?').get(entry.malId) as any;
+                    if (existingAnime) {
+                        entryDbIds.set(entry.malId, existingAnime.id);
+                    } else {
+                        const animeDbId = await upsertAnimeByMalId(entry.malId, entry.title, entry.type, entry.episodes);
+                        if (animeDbId) {
+                            entryDbIds.set(entry.malId, animeDbId);
+                        }
                     }
-
-                    // Check if already in user's list
-                    const existing = db.prepare('SELECT id FROM user_anime WHERE user_id = ? AND anime_id = ?')
-                        .get(req.userId, animeDbId) as any;
-
-                    if (existing) {
-                        skipped++;
-                        results.push({ title: entry.title, status: 'skipped', result: 'Already in list' });
-                        continue;
-                    }
-
-                    const id = uuidv4();
-                    const notes = [entry.comments, entry.tags].filter(Boolean).join(' | ') || null;
-
-                    db.prepare(`
-            INSERT INTO user_anime (id, user_id, anime_id, status, rating, notes, episodes_watched)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(
-                        id, req.userId, animeDbId, entry.status,
-                        entry.score > 0 ? entry.score : null,
-                        notes, entry.watchedEpisodes
-                    );
-
-                    imported++;
-                    results.push({ title: entry.title, status: entry.status, result: 'imported' });
-                } catch (err: any) {
-                    failed++;
-                    results.push({ title: entry.title, status: 'error', result: err.message });
+                } catch (e) {
+                    console.warn(`MAL Import ID pre-resolution failed for MAL ID ${entry.malId}:`, e);
                 }
             }
+
+            // 2. Execute all insertions inside a single database transaction
+            const runMALImportTransaction = db.transaction(() => {
+                for (const entry of entries) {
+                    try {
+                        const animeDbId = entryDbIds.get(entry.malId);
+                        if (!animeDbId) {
+                            failed++;
+                            results.push({ title: entry.title, status: 'failed', result: 'Could not find anime' });
+                            continue;
+                        }
+
+                        // Check if already in user's list
+                        const existing = db.prepare('SELECT id FROM user_anime WHERE user_id = ? AND anime_id = ?')
+                            .get(req.userId, animeDbId) as any;
+
+                        if (existing) {
+                            skipped++;
+                            results.push({ title: entry.title, status: 'skipped', result: 'Already in list' });
+                            continue;
+                        }
+
+                        const id = uuidv4();
+                        const notes = [entry.comments, entry.tags].filter(Boolean).join(' | ') || null;
+
+                        db.prepare(`
+                            INSERT INTO user_anime (id, user_id, anime_id, status, rating, notes, episodes_watched)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        `).run(
+                            id, req.userId, animeDbId, entry.status,
+                            entry.score > 0 ? entry.score : null,
+                            notes, entry.watchedEpisodes
+                        );
+
+                        imported++;
+                        results.push({ title: entry.title, status: entry.status, result: 'imported' });
+                    } catch (err: any) {
+                        failed++;
+                        results.push({ title: entry.title, status: 'error', result: err.message });
+                    }
+                }
+            });
+
+            runMALImportTransaction();
         } else if (importType === 'anilist_json') {
             const parsed = parseAniListJson(JSON.parse(content));
             console.log(`Importing ${parsed.entries.length} anime from AniList export`);
@@ -694,7 +728,7 @@ router.post('/anilist-username', authMiddleware, async (req: AuthRequest, res: R
 });
 
 // POST /api/import/text - Import from plain text (AI-assisted)
-import stringSimilarity from 'string-similarity';
+import { compareTwoStrings } from '../utils/similarity';
 
 router.post('/text', authMiddleware, async (req: AuthRequest, res: Response) => {
     try {
@@ -759,7 +793,7 @@ router.post('/text', authMiddleware, async (req: AuthRequest, res: Response) => 
                     }
 
                     for (const t of titlesToCompare) {
-                        const sim = stringSimilarity.compareTwoStrings(trimmedName.toLowerCase(), t);
+                        const sim = compareTwoStrings(trimmedName, t);
                         if (sim > maxSimilarity) {
                             maxSimilarity = sim;
                             bestMatch = candidate;

@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import db from '../utils/db';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { v4 as uuidv4 } from 'uuid';
+import { encrypt, decrypt } from '../utils/crypto';
 
 const router = Router();
 
@@ -23,10 +24,13 @@ router.post('/share', authMiddleware, async (req: AuthRequest, res: Response) =>
         const sessionId = uuidv4();
         const inviteToken = uuidv4();
 
+        const encryptedAccessToken = encrypt(accessToken);
+        const encryptedRefreshToken = refreshToken ? encrypt(refreshToken) : '';
+
         db.prepare(`
             INSERT INTO shared_sessions (id, admin_user_id, invite_token, access_token, refresh_token, project_id, email, token_expiry)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(sessionId, req.userId, inviteToken, accessToken, refreshToken || '', projectId, email || '', tokenExpiry || 0);
+        `).run(sessionId, req.userId, inviteToken, encryptedAccessToken, encryptedRefreshToken, projectId, email || '', tokenExpiry || 0);
 
         res.json({
             sessionId,
@@ -255,6 +259,9 @@ router.post('/update-tokens', authMiddleware, async (req: AuthRequest, res: Resp
             return;
         }
 
+        const encryptedAccessToken = encrypt(accessToken);
+        const encryptedRefreshToken = refreshToken ? encrypt(refreshToken) : null;
+
         const result = db.prepare(`
             UPDATE shared_sessions 
             SET access_token = ?, 
@@ -262,7 +269,7 @@ router.post('/update-tokens', authMiddleware, async (req: AuthRequest, res: Resp
                 project_id = COALESCE(?, project_id),
                 token_expiry = COALESCE(?, token_expiry)
             WHERE admin_user_id = ? AND is_active = 1
-        `).run(accessToken, refreshToken || null, projectId || null, tokenExpiry || null, req.userId);
+        `).run(encryptedAccessToken, encryptedRefreshToken, projectId || null, tokenExpiry || null, req.userId);
 
         res.json({ updated: (result.changes || 0) > 0 });
     } catch (error: any) {
@@ -286,7 +293,7 @@ export function getSharedAntigravityAuth(userId: string): { accessToken: string;
         if (!guestEntry) return null;
 
         return {
-            accessToken: guestEntry.access_token,
+            accessToken: decrypt(guestEntry.access_token),
             projectId: guestEntry.project_id,
         };
     } catch {
