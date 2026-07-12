@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { ImportProvider } from './context/ImportContext';
 import Navbar from './components/Navbar';
 import GuestBanner from './components/GuestBanner';
+import BackgroundTasksWidget from './components/BackgroundTasksWidget';
 import LoginPage from './pages/LoginPage';
 import SignupPage from './pages/SignupPage';
 import HomePage from './pages/HomePage';
@@ -101,6 +102,7 @@ function AppLayout() {
         <Route path="/taste" element={<ProtectedRoute><TasteProfilePage /></ProtectedRoute>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      <BackgroundTasksWidget />
     </>
   );
 }
